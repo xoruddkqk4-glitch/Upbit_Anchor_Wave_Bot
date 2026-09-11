@@ -519,7 +519,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             ticker=ticker, amount_krw=ORDER_AMOUNT_KRW
         )
 
-    # [진입 및 3분할 매수 체크]
+    # [진입 및 매수 체크]
     target_scale_in_steps = 3 if ENABLE_SCALE_IN_BUY else 1
     if not state["entry_bought"] or (
         ENABLE_SCALE_IN_BUY
@@ -540,45 +540,141 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         # 마감 확정일봉(09:00 마감) 종가가 기준봉 고가를 완벽히 상향 돌파하며 마감 시 매수 (장중 윗꼬리 휩소 차단)
         is_breakout = confirmed_close > ref_high
 
-      if is_pullback or is_breakout:
-        if not state["entry_bought"]:
+      # A. 신규 진입 (포지션 미보유 상태)
+      if not state["entry_bought"]:
+        if is_breakout:
+          # 1) 돌파 매매: 3분할이 아닌 100만원 전액 즉시 매수 + 손절가를 기준봉 고가(ref_high)로 재조정
           state["entry_bought"] = True
           state["entry_price"] = curr_close
           state["total_volume"] = ORDER_AMOUNT_KRW / curr_close
           state["remaining_ratio"] = 1.0
-          state["scale_in_count"] = 1
-        else:
-          state["scale_in_count"] += 1
-          add_volume = (ORDER_AMOUNT_KRW / target_scale_in_steps) / curr_close
-          state["total_volume"] += add_volume
-          state["entry_price"] = (
-              (state["entry_price"] * (state["total_volume"] - add_volume))
-              + (curr_close * add_volume)
-          ) / state["total_volume"]
+          state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
+          prev_low = state["effective_ref_low"]
+          state["effective_ref_low"] = ref_high  # 손절선을 돌파가(고가)로 상향 재조정
 
-        event_name = (
-            "BUY (SCALE-IN)" if state["scale_in_count"] > 1 else "BUY"
-        )
-        signals.append({
-            "Ticker": ticker,
-            "Event": event_name,
-            "Entry_Price": round(state["entry_price"], 2),
-        })
+          signals.append({
+              "Ticker": ticker,
+              "Event": "BUY (BREAKOUT ALL-IN)",
+              "Entry_Price": round(curr_close, 2),
+              "Stop_Loss_Adjusted": ref_high,
+          })
 
-        # 텔레그램 매수 알림
-        SendMessage(
-            f"<b>🔵 [BST 봇] 매수 시그널 발생! ({'분할 매수' if state['scale_in_count'] > 1 else '신규 매수'})</b>\n"
-            f"• <b>종목</b>: {ticker}\n"
-            f"• <b>체결/진입가</b>: {format_price(curr_close)} (평단가: {format_price(state['entry_price'])})\n"
-            f"• <b>매수 단계</b>: {state['scale_in_count']}/{target_scale_in_steps}차 분할 매수\n"
-            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
-        )
-
-        if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
-          tranche_amount = ORDER_AMOUNT_KRW / target_scale_in_steps
-          upbit_client.buy_limit_with_slippage_protection(
-              ticker=ticker, amount_krw=tranche_amount
+          SendMessage(
+              f"<b>🚀 [BST 봇] 돌파 매수 발생! (BREAKOUT ALL-IN)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>체결/진입가</b>: {format_price(curr_close)}\n"
+              f"• <b>매수 금액</b>: {ORDER_AMOUNT_KRW:,.0f}원 (100% 전액 매수)\n"
+              f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(ref_high)}</b> (돌파가로 상향)\n"
+              f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
+
+          if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
+            upbit_client.buy_limit_with_slippage_protection(
+                ticker=ticker, amount_krw=ORDER_AMOUNT_KRW
+            )
+
+        elif is_pullback:
+          # 2) 눌림목 매매: 1차 분할 매수 진행 (1/3 금액)
+          tranche_amount = ORDER_AMOUNT_KRW / target_scale_in_steps
+          state["entry_bought"] = True
+          state["entry_price"] = curr_close
+          state["total_volume"] = tranche_amount / curr_close
+          state["remaining_ratio"] = 1.0
+          state["scale_in_count"] = 1
+
+          signals.append({
+              "Ticker": ticker,
+              "Event": "BUY (PULLBACK 1/3)",
+              "Entry_Price": round(curr_close, 2),
+          })
+
+          SendMessage(
+              f"<b>🔵 [BST 봇] 눌림목 매수 시그널 발생! (1/{target_scale_in_steps}차 분할 매수)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>체결/진입가</b>: {format_price(curr_close)}\n"
+              f"• <b>매수 금액</b>: {tranche_amount:,.0f}원 (1차 매수)\n"
+              f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+          )
+
+          if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
+            upbit_client.buy_limit_with_slippage_protection(
+                ticker=ticker, amount_krw=tranche_amount
+            )
+
+      # B. 눌림목 진입 후 3회차 미만에 도달해 있는 추가 매수 관리
+      elif (
+          state["entry_bought"]
+          and state["scale_in_count"] < target_scale_in_steps
+          and state["remaining_ratio"] > 0
+      ):
+        if is_breakout:
+          # 1) 눌림목 1~2회차 진행 중 고가 돌파 시: 남은 금액을 전액(한번에) 매수하여 100만 원 채우고 손절가 상향
+          remaining_steps = target_scale_in_steps - state["scale_in_count"]
+          remaining_amount = (
+              ORDER_AMOUNT_KRW / target_scale_in_steps
+          ) * remaining_steps
+          add_volume = remaining_amount / curr_close
+          old_volume = state["total_volume"]
+
+          state["entry_price"] = (
+              (state["entry_price"] * old_volume) + (curr_close * add_volume)
+          ) / (old_volume + add_volume)
+          state["total_volume"] += add_volume
+          state["scale_in_count"] = target_scale_in_steps
+          prev_low = state["effective_ref_low"]
+          state["effective_ref_low"] = ref_high  # 손절선을 돌파가(고가)로 상향 재조정
+
+          signals.append({
+              "Ticker": ticker,
+              "Event": "BUY (BREAKOUT FULL SCALE-IN)",
+              "Entry_Price": round(state["entry_price"], 2),
+              "Stop_Loss_Adjusted": ref_high,
+          })
+
+          SendMessage(
+              f"<b>🚀 [BST 봇] 고가 돌파 시그널! 남은 잔액 전액 매수 (BREAKOUT ALL-IN)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>체결가</b>: {format_price(curr_close)} (평단가: {format_price(state['entry_price'])})\n"
+              f"• <b>매수 잔액</b>: {remaining_amount:,.0f}원 (남은 금액 전액 집행 ➔ 3/{target_scale_in_steps}차 완료)\n"
+              f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(ref_high)}</b> (돌파가로 상향)\n"
+              f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+          )
+
+          if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
+            upbit_client.buy_limit_with_slippage_protection(
+                ticker=ticker, amount_krw=remaining_amount
+            )
+
+        elif is_pullback:
+          # 2) 순수 추가 눌림목 조건 만족 시: 1/3 금액만큼 다음 회차 분할 매수 진행
+          tranche_amount = ORDER_AMOUNT_KRW / target_scale_in_steps
+          state["scale_in_count"] += 1
+          add_volume = tranche_amount / curr_close
+          old_volume = state["total_volume"]
+
+          state["entry_price"] = (
+              (state["entry_price"] * old_volume) + (curr_close * add_volume)
+          ) / (old_volume + add_volume)
+          state["total_volume"] += add_volume
+
+          signals.append({
+              "Ticker": ticker,
+              "Event": f"BUY (PULLBACK {state['scale_in_count']}/{target_scale_in_steps})",
+              "Entry_Price": round(state["entry_price"], 2),
+          })
+
+          SendMessage(
+              f"<b>🔵 [BST 봇] 눌림목 추가 매수 시그널! ({state['scale_in_count']}/{target_scale_in_steps}차 분할 매수)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>체결가</b>: {format_price(curr_close)} (평단가: {format_price(state['entry_price'])})\n"
+              f"• <b>매수 금액</b>: {tranche_amount:,.0f}원\n"
+              f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+          )
+
+          if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
+            upbit_client.buy_limit_with_slippage_protection(
+                ticker=ticker, amount_krw=tranche_amount
+            )
 
     # [매도 및 5일선 관리 체크]
     if state["entry_bought"] and state["remaining_ratio"] > 0:
