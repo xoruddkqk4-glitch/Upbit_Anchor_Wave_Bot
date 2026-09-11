@@ -137,4 +137,13 @@
   - `python scan_ref_candles.py` 20개 지정 종목 스캔 및 `bot_state.json` 저장 정상 검증 완료
   - `python Upbit_Anchor_Wave_Bot.py` 20개 종목 5분 주기 감시 및 엑셀 자동 매매 기록(`save_trade_to_excel`) 정상 검증 완료
 
+## 📝 [2026-09-11 21:51] 업데이트 이력 (Commit ID: 39f83ca)
+- **수정 내용**:
+  1. **단일 엑셀 파일 매매 기록 누적 저장**: 일별 분리 파일 방식에서 실행 폴더 내 **단일 엑셀 파일(`trade_history.xlsx`)**의 맨 마지막 행에 매매 내역 및 실현 손익을 계속 누적 저장하도록 `save_trade_to_excel()` 보정
+  2. **최대 매수 금액 설정 정돈**: `MAX_BUY_AMOUNT_KRW = 1000000` 파라미터를 `Upbit_Anchor_Wave_Bot.py` 코드 상단에서 단독으로 통합 관리하도록 구성
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python Upbit_Anchor_Wave_Bot.py` 단일 엑셀 파일(`trade_history.xlsx`) 누적 저장 정상 동작 검증 완료
+
+
 

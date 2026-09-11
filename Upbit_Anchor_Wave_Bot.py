@@ -178,13 +178,12 @@ def save_trade_to_excel(
     return_pct: float = 0.0,
     reason: str = "",
 ):
-  """매매 체결 및 실현 손익 내역을 실행 폴더 내 일별 엑셀 파일(trade_history_YYYY-MM-DD.xlsx)에 자동 저장"""
+  """매매 체결 및 실현 손익 내역을 실행 폴더 내 단일 엑셀 파일(trade_history.xlsx)에 누적 자동 저장"""
   try:
     now = datetime.datetime.now()
-    date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    excel_file = f"trade_history_{date_str}.xlsx"
+    excel_file = "trade_history.xlsx"
 
     pnl_val = round(realized_pnl_krw) if trade_type == "매도" else 0
     ret_val = round(return_pct * 100, 2) if trade_type == "매도" else 0.0
