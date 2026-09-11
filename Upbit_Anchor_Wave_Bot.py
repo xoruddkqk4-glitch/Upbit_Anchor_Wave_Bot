@@ -91,6 +91,33 @@ STATE_FILE = "bot_state.json"
 # ==============================================================================
 
 
+def format_price(price: float, show_unit: bool = True) -> str:
+  """가격 크기에 따라 동적으로 유효 소수점 자릿수 포맷팅 (1원 미만 밈코인은 소수점 8자리까지 표기)"""
+  if price is None:
+    return "0원" if show_unit else "0"
+  try:
+    val = float(price)
+  except (ValueError, TypeError):
+    return str(price)
+
+  if val == 0:
+    return "0원" if show_unit else "0"
+
+  unit_str = "원" if show_unit else ""
+
+  if val < 1:
+    # 1원 미만 (밈코인 등 초저가 코인): 소수점 8자리까지 표기 (미세 trailing 0 제거)
+    formatted = f"{val:.8f}".rstrip("0").rstrip(".")
+    return f"{formatted}{unit_str}"
+  elif val < 100:
+    # 1원 이상 100원 미만: 소수점 4자리까지 표기
+    formatted = f"{val:,.4f}".rstrip("0").rstrip(".")
+    return f"{formatted}{unit_str}"
+  else:
+    # 100원 이상: 천단위 쉼표 + 소수점 1자리 표기
+    return f"{val:,.1f}{unit_str}"
+
+
 def load_state():
   """JSON 파일에서 종목별 실시간 트레이딩 상태 로드"""
   if os.path.exists(STATE_FILE):
@@ -104,10 +131,15 @@ def load_state():
 
 
 def save_state(state):
-  """종목별 실시간 트레이딩 상태를 JSON 파일에 영구 저장"""
+  """종목별 실시간 트레이딩 상태를 JSON 파일에 영구 저장 (유효한 기준봉 포착 종목 또는 매수 포지션 종목만 필터링하여 기록)"""
   try:
+    clean_state = {
+        t: st
+        for t, st in state.items()
+        if st.get("entry_bought", False) or st.get("active_ref_date") is not None
+    }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-      json.dump(state, f, ensure_ascii=False, indent=4)
+      json.dump(clean_state, f, ensure_ascii=False, indent=4)
   except Exception as e:
     print(f"[오류] 상태 파일 저장 실패: {e}")
 
@@ -411,8 +443,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         SendMessage(
             f"<b>🔴 [BST 봇] 손절 매도! (STOP LOSS)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
-            f"• <b>매도가</b>: {curr_close:,.1f}원\n"
-            f"• <b>사유</b>: 기준봉 저가({effective_ref_low:,.1f}원) 하향 이탈 -> 전량 손절 및 상태 초기화\n"
+            f"• <b>매도가</b>: {format_price(curr_close)}\n"
+            f"• <b>사유</b>: 기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 -> 전량 손절 및 상태 초기화\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 
@@ -470,8 +502,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       SendMessage(
           f"<b>🚀 [BST 봇] 재매수 시그널 발생! (RE-ENTRY)</b>\n"
           f"• <b>종목</b>: {ticker}\n"
-          f"• <b>전략</b>: 이전 매도 기준가({triggered_base_price:,.1f}원) 현재가 상향 돌파 + 5일선 상승 전환 확인\n"
-          f"• <b>체결/진입가</b>: {entry_price:,.1f}원\n"
+          f"• <b>전략</b>: 이전 매도 기준가({format_price(triggered_base_price)}) 현재가 상향 돌파 + 5일선 상승 전환 확인\n"
+          f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
           f"• <b>매수 금액</b>: {ORDER_AMOUNT_KRW:,.0f}원 전액 재매수\n"
           f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
       )
@@ -529,7 +561,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         SendMessage(
             f"<b>🔵 [BST 봇] 매수 시그널 발생! ({'분할 매수' if state['scale_in_count'] > 1 else '신규 매수'})</b>\n"
             f"• <b>종목</b>: {ticker}\n"
-            f"• <b>체결/진입가</b>: {curr_close:,.1f}원 (평단가: {state['entry_price']:,.1f}원)\n"
+            f"• <b>체결/진입가</b>: {format_price(curr_close)} (평단가: {format_price(state['entry_price'])})\n"
             f"• <b>매수 단계</b>: {state['scale_in_count']}/{target_scale_in_steps}차 분할 매수\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
@@ -572,7 +604,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         SendMessage(
             f"<b>🟢 [BST 봇] 50% 분할 익절! (PARTIAL SELL)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
-            f"• <b>매도가</b>: {curr_close:,.1f}원\n"
+            f"• <b>매도가</b>: {format_price(curr_close)}\n"
             f"• <b>수익률</b>: <b>{current_return * 100:+.2f}%</b>\n"
             f"• <b>사유</b>: 파동 시간/가격 대칭 목표 달성 (보유 수량 50% 익절)\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
@@ -600,8 +632,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         SendMessage(
             f"<b>🟡 [BST 봇] 추세 매도! (MA5 DOWN)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
-            f"• <b>매도가</b>: {curr_close:,.1f}원\n"
-            f"• <b>사유</b>: 5일선 하향 꺾임 -> 잔여 전액 매도 (기준가 {curr_close:,.1f}원 기록)\n"
+            f"• <b>매도가</b>: {format_price(curr_close)}\n"
+            f"• <b>사유</b>: 5일선 하향 꺾임 -> 잔여 전액 매도 (기준가 {format_price(curr_close)} 기록)\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 

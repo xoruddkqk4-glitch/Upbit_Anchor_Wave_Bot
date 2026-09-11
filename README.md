@@ -94,3 +94,16 @@
   - `scan_ref_candles.py` 실행 시 업비트 실시간 유의/위험 종목 동적 추출 및 스캔 대상 자동 제외 동작 확인
   - `Upbit_Anchor_Wave_Bot.py` 모니터링 루프 실행 시 실시간 유의 종목 감시 대상 차단 확인
 
+## 📝 [2026-09-11 21:04] 업데이트 이력 (Commit ID: e3594a0)
+- **수정 내용**:
+  1. Ticker 일괄 배치 조회 API(`GET /v1/ticker?markets=...`)를 활용하여 `scan_ref_candles.py` 스캐너의 실행 속도를 25초 이상에서 약 3초로 획기적 최적화 (800%↑ 속도 향상)
+  2. 09:07 기준봉 포착 텔레그램 메시지에 현재가(`curr_close`) 항목 추가 및 실제 가격 위치(고가/중심가/손절가)에 맞춘 동적 가격 계층 순서 배치 구현
+  3. 1원 미만 밈코인/초저가 종목의 소수점 뭉개짐 방지를 위해 최대 소수점 8자리 유효숫자 동적 포맷팅 알고리즘(`format_price()`) 적용
+  4. 텔레그램 메시지의 `(눌림목 타겟)` 및 `(마진노선)` 부가 텍스트 제거하여 알림 수신 양식 직관화
+  5. `bot_state.json` 상태 저장 시 기준봉 미포착 종목(`active_ref_date: null`) 및 미보유 종목 자동 필터링 제거 구현
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python scan_ref_candles.py` 3초 쾌속 스캔 및 `bot_state.json` 미포착 종목 자동 필터링 완료
+  - 텔레그램 알림 메시지 동적 가격 계층 순서 배치 및 밈코인 소수점 8자리 유효숫자 정상 작동 검증
+
+

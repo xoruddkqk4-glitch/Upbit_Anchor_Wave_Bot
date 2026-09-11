@@ -42,6 +42,33 @@ EXCLUDE_TICKERS = [
 TARGET_TICKERS = None  # None: 거래대금 상위 코인 자동 추출
 
 
+def format_price(price: float, show_unit: bool = True) -> str:
+    """가격 크기에 따라 동적으로 유효 소수점 자릿수 포맷팅 (1원 미만 밈코인은 소수점 8자리까지 표기)"""
+    if price is None:
+        return "0원" if show_unit else "0"
+    try:
+        val = float(price)
+    except (ValueError, TypeError):
+        return str(price)
+
+    if val == 0:
+        return "0원" if show_unit else "0"
+
+    unit_str = "원" if show_unit else ""
+
+    if val < 1:
+        # 1원 미만 (밈코인 등 초저가 코인): 소수점 8자리까지 표기 (미세 trailing 0 제거)
+        formatted = f"{val:.8f}".rstrip("0").rstrip(".")
+        return f"{formatted}{unit_str}"
+    elif val < 100:
+        # 1원 이상 100원 미만: 소수점 4자리까지 표기
+        formatted = f"{val:,.4f}".rstrip("0").rstrip(".")
+        return f"{formatted}{unit_str}"
+    else:
+        # 100원 이상: 천단위 쉼표 + 소수점 1자리 표기
+        return f"{val:,.1f}{unit_str}"
+
+
 def load_state():
     """JSON 파일에서 종목별 실시간 트레이딩 상태 로드"""
     if os.path.exists(STATE_FILE):
@@ -55,10 +82,15 @@ def load_state():
 
 
 def save_state(state):
-    """종목별 실시간 트레이딩 상태를 JSON 파일에 영구 저장"""
+    """종목별 실시간 트레이딩 상태를 JSON 파일에 영구 저장 (유효한 기준봉 포착 종목 또는 매수 포지션 종목만 필터링하여 기록)"""
     try:
+        clean_state = {
+            t: st
+            for t, st in state.items()
+            if st.get("entry_bought", False) or st.get("active_ref_date") is not None
+        }
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=4)
+            json.dump(clean_state, f, ensure_ascii=False, indent=4)
         print(f"[알림] 스캔 결과가 '{STATE_FILE}'에 성공적으로 저장되었습니다.")
     except Exception as e:
         print(f"[오류] 상태 파일 저장 실패: {e}")
@@ -84,7 +116,7 @@ def get_upbit_warning_tickers():
 
 
 def get_top_trading_volume_tickers(max_count=20, exclude_tickers=None):
-    """어제 완전 마감된 일봉 1개(09:00~09:00)의 누적 거래대금 기준 상위 코인 정렬 추출"""
+    """어제 완전 마감된 일봉 1개(09:00~09:00)의 누적 거래대금 기준 상위 코인 정렬 추출 (Ticker 배치 조회를 통한 속도 최적화)"""
     if exclude_tickers is None:
         exclude_tickers = []
 
@@ -103,19 +135,31 @@ def get_top_trading_volume_tickers(max_count=20, exclude_tickers=None):
         krw_tickers = [
             item["market"]
             for item in res_markets
-            if item["market"].startswith("KRW-")
+            if item["market"].startswith("KRW-") and item["market"] not in combined_exclude
         ]
+
+        if not krw_tickers:
+            return []
+
+        # 1차: 1회의 Ticker 일괄 요청으로 24시간 거래대금 상위 35개 후보군을 빠르게 1차 선별 (속도 극대화)
+        url_ticker = f"https://api.upbit.com/v1/ticker?markets={','.join(krw_tickers)}"
+        res_ticker = requests.get(url_ticker, timeout=5).json()
+        if not isinstance(res_ticker, list):
+            return []
+
+        sorted_candidates = sorted(
+            res_ticker, key=lambda x: float(x.get("acc_trade_price_24h", 0)), reverse=True
+        )[: max_count * 2]
 
         ticker_volumes = []
 
-        for ticker in krw_tickers:
-            if ticker in combined_exclude:
-                continue
+        # 2차: 후보군 35개 종목에 한해서만 어제 마감된 1일봉(res_candle[1])의 정확한 거래대금 추출
+        for item in sorted_candidates:
+            ticker = item["market"]
             try:
                 url_candle = f"https://api.upbit.com/v1/candles/days?market={ticker}&count=2"
                 res_candle = requests.get(url_candle, timeout=5).json()
                 if isinstance(res_candle, list) and len(res_candle) >= 2:
-                    # res_candle[0]은 당일 진행 캔들, res_candle[1]이 어제 마감된 1일봉 캔들
                     yesterday_candle = res_candle[1]
                     trade_price_krw = float(
                         yesterday_candle.get(
@@ -125,11 +169,11 @@ def get_top_trading_volume_tickers(max_count=20, exclude_tickers=None):
                         )
                     )
                     ticker_volumes.append((ticker, trade_price_krw))
-                time.sleep(0.04)  # 업비트 API 요청 간격 조절
+                time.sleep(0.02)
             except Exception:
                 continue
 
-        # 어제 일봉 누적 거래대금 내림차순 정렬
+        # 어제 일봉 누적 거래대금 내림차순 최종 정렬
         ticker_volumes.sort(key=lambda x: x[1], reverse=True)
 
         sorted_tickers = [item[0] for item in ticker_volumes]
@@ -278,7 +322,7 @@ def scan_all_reference_candles():
                 if curr_close < effective_ref_low:
                     print(
                         f"  [손절선 이탈 무시] {ticker} -> 기준일: {ref_date_str} |"
-                        f" 현재가({curr_close:,.1f}원) < 손절가({effective_ref_low:,.1f}원)"
+                        f" 현재가({format_price(curr_close)}) < 손절가({format_price(effective_ref_low)})"
                         " (무효화된 기준봉 무시)"
                     )
                     if not state["entry_bought"]:
@@ -295,18 +339,36 @@ def scan_all_reference_candles():
 
                 detected_count += 1
                 print(
-                    f"  [포착] {ticker} -> 기준일: {ref_date_str} | 중심가: {ref_mid:,.1f}원 |"
-                    f" 손절가: {effective_ref_low:,.1f}원 | 고가: {ref_high:,.1f}원"
+                    f"  [포착] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
+                    f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
                 )
+
+                # 현재가 위치에 맞게 고가/중심가/손절가 계층 순서로 가격 블록 동적 구성 (가시성 강조 및 유효 소수점 최대 8자리 자동 표기)
+                high_line = f"• <b>고가</b>: {format_price(ref_high)}"
+                mid_line = f"• <b>중심가</b>: {format_price(ref_mid)}"
+                low_line = f"• <b>손절가</b>: {format_price(effective_ref_low)}"
+
+                if curr_close >= ref_high:
+                    curr_line = f"🚀 <b>[현재가] (고가 돌파)</b>: <u><b>{format_price(curr_close)}</b></u>"
+                    price_hierarchy = [curr_line, high_line, mid_line, low_line]
+                elif curr_close >= ref_mid:
+                    curr_line = f"📍 <b>[현재가]</b>: <u><b>{format_price(curr_close)}</b></u>"
+                    price_hierarchy = [high_line, curr_line, mid_line, low_line]
+                elif curr_close >= effective_ref_low:
+                    curr_line = f"🎯 <b>[현재가] (눌림목 영역)</b>: <u><b>{format_price(curr_close)}</b></u>"
+                    price_hierarchy = [high_line, mid_line, curr_line, low_line]
+                else:
+                    curr_line = f"🚨 <b>[현재가] (손절가 하회)</b>: <u><b>{format_price(curr_close)}</b></u>"
+                    price_hierarchy = [high_line, mid_line, low_line, curr_line]
+
+                price_block = "\n".join(price_hierarchy)
 
                 # 텔레그램 알림 메시지 발송
                 telegram_msg = (
                     f"<b>[BST 봇] 09:07 KST 기준봉 포착!</b>\n"
                     f"• <b>종목</b>: {ticker}\n"
                     f"• <b>기준일</b>: {ref_date_str}\n"
-                    f"• <b>고가</b>: {ref_high:,.1f}원\n"
-                    f"• <b>중심가 (눌림목 타겟)</b>: {ref_mid:,.1f}원\n"
-                    f"• <b>손절가 (마진노선)</b>: {effective_ref_low:,.1f}원"
+                    f"{price_block}"
                 )
                 SendMessage(telegram_msg)
             else:
