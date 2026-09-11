@@ -83,3 +83,14 @@
   - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
   - `scan_ref_candles.py` 전일 마감 일봉 거래대금 20개 종목 정렬 및 사전 무시 필터링 동작 확인
   - `Upbit_Anchor_Wave_Bot.py` 마감 일봉 확정 매수 & 5일선 상승 전환 재매수 로직 정상 동작 확인
+
+## 📝 [2026-09-11 20:46] 업데이트 이력 (Commit ID: 63bce2e)
+- **수정 내용**:
+  1. 업비트 API(`https://api.upbit.com/v1/market/all?is_details=true`)의 `market_event.warning` 플래그 기반 실시간 유의/위험 종목 동적 자동 제외 기능 구현 (`get_upbit_warning_tickers()`)
+  2. `scan_ref_candles.py` 기준봉 스캐너에 업비트 유의/위험 종목 자동 정렬 및 사전 제외 로직 적용
+  3. `Upbit_Anchor_Wave_Bot.py` 메인 트레이딩 모니터링 루프에 고정 제외 목록(`EXCLUDE_TICKERS`)과 실시간 유의 종목을 동적 병합(`combined_exclude`)하여 감시 및 매매 차단
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `scan_ref_candles.py` 실행 시 업비트 실시간 유의/위험 종목 동적 추출 및 스캔 대상 자동 제외 동작 확인
+  - `Upbit_Anchor_Wave_Bot.py` 모니터링 루프 실행 시 실시간 유의 종목 감시 대상 차단 확인
+

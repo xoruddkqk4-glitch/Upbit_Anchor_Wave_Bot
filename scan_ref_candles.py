@@ -64,10 +64,38 @@ def save_state(state):
         print(f"[오류] 상태 파일 저장 실패: {e}")
 
 
+def get_upbit_warning_tickers():
+    """업비트 실시간 투자 유의/위험 종목(warning=True) 목록 조회"""
+    try:
+        url = "https://api.upbit.com/v1/market/all?is_details=true"
+        res = requests.get(url, timeout=5).json()
+        warning_tickers = []
+        if isinstance(res, list):
+            for item in res:
+                market = item.get("market", "")
+                if market.startswith("KRW-"):
+                    market_event = item.get("market_event", {})
+                    if market_event.get("warning", False):
+                        warning_tickers.append(market)
+        return warning_tickers
+    except Exception as e:
+        print(f"[경고] 업비트 유의 종목 조회 실패: {e}")
+        return []
+
+
 def get_top_trading_volume_tickers(max_count=20, exclude_tickers=None):
     """어제 완전 마감된 일봉 1개(09:00~09:00)의 누적 거래대금 기준 상위 코인 정렬 추출"""
     if exclude_tickers is None:
         exclude_tickers = []
+
+    warning_tickers = get_upbit_warning_tickers()
+    if warning_tickers:
+        print(
+            f"  [안내] 업비트 실시간 유의/위험 종목 동적 자동 제외"
+            f" ({len(warning_tickers)}개): {warning_tickers}"
+        )
+
+    combined_exclude = set(exclude_tickers + warning_tickers)
 
     try:
         url_markets = "https://api.upbit.com/v1/market/all"
@@ -81,7 +109,7 @@ def get_top_trading_volume_tickers(max_count=20, exclude_tickers=None):
         ticker_volumes = []
 
         for ticker in krw_tickers:
-            if ticker in exclude_tickers:
+            if ticker in combined_exclude:
                 continue
             try:
                 url_candle = f"https://api.upbit.com/v1/candles/days?market={ticker}&count=2"

@@ -618,21 +618,43 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
 # ==============================================================================
 
 
+def get_upbit_warning_tickers():
+  """업비트 실시간 투자 유의/위험 종목(warning=True) 목록 조회"""
+  try:
+    url = "https://api.upbit.com/v1/market/all?is_details=true"
+    res = requests.get(url, timeout=5).json()
+    warning_tickers = []
+    if isinstance(res, list):
+      for item in res:
+        market = item.get("market", "")
+        if market.startswith("KRW-"):
+          market_event = item.get("market_event", {})
+          if market_event.get("warning", False):
+            warning_tickers.append(market)
+    return warning_tickers
+  except Exception as e:
+    print(f"[경고] 업비트 유의 종목 조회 실패: {e}")
+    return []
+
+
 def run_market_scan():
   """5분마다 실행되어 09:07 스캐너(scan_ref_candles.py)가 공유한 활성 기준봉 종목만 실시간 점검"""
   global_state = load_state()
   client = UpbitClient(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)
+
+  warning_tickers = get_upbit_warning_tickers()
+  combined_exclude = set(EXCLUDE_TICKERS + warning_tickers)
 
   # 09:07 스캐너에 의해 기준봉이 포착되었거나(active_ref_date 존재) 매수 포지션이 존재하는 종목 중 제외 코인 빼고 선별
   active_tickers = [
       ticker
       for ticker, st in global_state.items()
       if (st.get("active_ref_date") is not None or st.get("entry_bought", False))
-      and ticker not in EXCLUDE_TICKERS
+      and ticker not in combined_exclude
   ]
 
   if TARGET_TICKERS:
-    tickers = [t for t in TARGET_TICKERS if t not in EXCLUDE_TICKERS]
+    tickers = [t for t in TARGET_TICKERS if t not in combined_exclude]
   else:
     tickers = active_tickers
 
