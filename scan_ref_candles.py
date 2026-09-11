@@ -253,17 +253,11 @@ def scan_all_reference_candles():
 
     for ticker in target_tickers:
         try:
-            # 이미 활성 기준봉이 등록되어 감시 중이거나 포지션 보유 중인 코인은 스캔 건너뛰기(Skip)
+            # 이미 매수 포지션 보유 중인 코인은 스캔 건너뛰기(Skip)
             if ticker in global_state:
                 state = global_state[ticker]
                 if state.get("entry_bought", False):
                     print(f"  [패스] {ticker} -> 현재 매수 포지션 보유 중 (스캔 건너뜀)")
-                    continue
-                elif state.get("active_ref_date"):
-                    print(
-                        f"  [패스] {ticker} -> 이미 기준봉 감시 중 (스캔 건너뜀, 기준일:"
-                        f" {state.get('active_ref_date')})"
-                    )
                     continue
 
             df = get_daily_ohlcv(ticker, count=CANDLE_COUNT)
@@ -294,6 +288,16 @@ def scan_all_reference_candles():
 
             if ref_indices:
                 latest_ref_idx = ref_indices[-1]
+                ref_date_str = latest_ref_idx.strftime("%Y-%m-%d")
+                prev_ref_date = state.get("active_ref_date")
+
+                # 동일한 기준일의 기준봉이 이미 등록되어 있는 경우 중복 수신 방지를 위해 스캔 패스
+                if prev_ref_date == ref_date_str:
+                    print(
+                        f"  [패스] {ticker} -> 동일한 기준봉 감시 중 (스캔 건너뜀, 기준일: {ref_date_str})"
+                    )
+                    continue
+
                 ref_row = df.loc[latest_ref_idx]
                 ref_pos = df.index.get_loc(latest_ref_idx)
 
@@ -315,7 +319,6 @@ def scan_all_reference_candles():
                 swing_low_price = float(df["low"].iloc[lookback_start : ref_pos + 1].min())
                 wave_height = ref_high - swing_low_price
 
-                ref_date_str = latest_ref_idx.strftime("%Y-%m-%d")
                 curr_close = float(df.iloc[-1]["close"])
 
                 # [사전 필터링] 현재가가 손절가(기준봉 저가) 이하로 이미 이탈한 무효화된 기준봉은 등록하지 않고 무시
@@ -329,7 +332,7 @@ def scan_all_reference_candles():
                         state["active_ref_date"] = None
                     continue
 
-                # 새로 발견되었거나 갱신된 기준봉 정보 업데이트
+                # 새로 발견되었거나 더 최신 날짜로 갱신된 기준봉 정보 업데이트
                 state["active_ref_date"] = ref_date_str
                 state["ref_high"] = ref_high
                 state["effective_ref_low"] = effective_ref_low
@@ -338,10 +341,16 @@ def scan_all_reference_candles():
                 state["wave_height"] = wave_height
 
                 detected_count += 1
-                print(
-                    f"  [포착] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
-                    f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
-                )
+                if prev_ref_date:
+                    print(
+                        f"  [기준봉 갱신] {ticker} -> 이전 기준일({prev_ref_date}) => 최신 기준일({ref_date_str}) 갱신! | 현재가: {format_price(curr_close)} |"
+                        f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
+                    )
+                else:
+                    print(
+                        f"  [포착] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
+                        f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
+                    )
 
                 # 현재가 위치에 맞게 고가/중심가/손절가 계층 순서로 가격 블록 동적 구성 (가시성 강조 및 유효 소수점 최대 8자리 자동 표기)
                 high_line = f"• <b>고가</b>: {format_price(ref_high)}"
@@ -363,9 +372,10 @@ def scan_all_reference_candles():
 
                 price_block = "\n".join(price_hierarchy)
 
+                title_str = "최신 기준봉 갱신!" if prev_ref_date else "09:07 KST 기준봉 포착!"
                 # 텔레그램 알림 메시지 발송
                 telegram_msg = (
-                    f"<b>[BST 봇] 09:07 KST 기준봉 포착!</b>\n"
+                    f"<b>[BST 봇] {title_str}</b>\n"
                     f"• <b>종목</b>: {ticker}\n"
                     f"• <b>기준일</b>: {ref_date_str}\n"
                     f"{price_block}"

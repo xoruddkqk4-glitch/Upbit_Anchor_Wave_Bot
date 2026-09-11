@@ -106,4 +106,15 @@
   - `python scan_ref_candles.py` 3초 쾌속 스캔 및 `bot_state.json` 미포착 종목 자동 필터링 완료
   - 텔레그램 알림 메시지 동적 가격 계층 순서 배치 및 밈코인 소수점 8자리 유효숫자 정상 작동 검증
 
+## 📝 [2026-09-11 21:25] 업데이트 이력 (Commit ID: 29b7df5)
+- **수정 내용**:
+  1. `scan_ref_candles.py` 스캐너에 최근 날짜의 새로운 기준봉 포착 시 기존 기준봉 자동 갱신(Update) 및 `[최신 기준봉 갱신!]` 텔레그램 메시지 재발송 로직 반영
+  2. `Upbit_Anchor_Wave_Bot.py` 매수 조건에 스윙/휩소 방지 안전 스타일 적용 (마감 확정일봉 `df.iloc[-2]` 종가/저가/양봉여부 기준 눌림목 및 돌파 진입)
+  3. `bot_state.json` 유효 활성 기준봉 12개 자동 스캔 및 정상 저장 상태 검증
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python scan_ref_candles.py` 3초 쾌속 스캔 및 신규/최신 기준봉 갱신 지원 동작 확인
+  - `python Upbit_Anchor_Wave_Bot.py` 마감 확정 일봉 기반 휩소 방지 매수 조건 동작 검증
+
+
 

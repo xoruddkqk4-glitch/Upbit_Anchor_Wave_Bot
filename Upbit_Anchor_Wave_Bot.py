@@ -386,6 +386,12 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
   curr_ma5 = df["MA5"].iloc[-1]
   prev_ma5 = df["MA5"].iloc[-2] if len(df) >= 2 else curr_ma5
 
+  # 마감 확정된 전일 일봉 (09:00 마감 완결 캔들 - 스윙/휩소 방지용)
+  confirmed_row = df.iloc[-2] if len(df) >= 2 else curr_row
+  confirmed_close = confirmed_row["close"]
+  confirmed_open = confirmed_row["open"]
+  confirmed_low = confirmed_row["low"]
+
   # 1. 활성 기준봉이 없는 경우: 신규 기준봉 탐색
   if not state["active_ref_date"]:
     ref_indices = df.index[df["Is_Ref_Candle"]].tolist()
@@ -522,15 +528,17 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
     ):
       is_pullback = False
       if ENABLE_PULLBACK_ENTRY:
-        price_cond = curr_low <= ref_mid
+        # 마감 확정일봉(09:00 마감) 기준: 중심가 이하 저가 터치 후 확실한 양봉 마감 시 매수
+        price_cond = confirmed_low <= ref_mid
         rebound_cond = (
-            (curr_close > curr_open) if REQUIRE_BULLISH_REBOUND else True
+            (confirmed_close > confirmed_open) if REQUIRE_BULLISH_REBOUND else True
         )
         is_pullback = price_cond and rebound_cond
 
       is_breakout = False
       if ENABLE_BREAKOUT_ENTRY:
-        is_breakout = curr_close > ref_high
+        # 마감 확정일봉(09:00 마감) 종가가 기준봉 고가를 완벽히 상향 돌파하며 마감 시 매수 (장중 윗꼬리 휩소 차단)
+        is_breakout = confirmed_close > ref_high
 
       if is_pullback or is_breakout:
         if not state["entry_bought"]:
