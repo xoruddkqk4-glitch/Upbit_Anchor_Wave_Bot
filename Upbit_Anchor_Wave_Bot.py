@@ -439,10 +439,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       }
       return signals
 
-    # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 시 최대 금액(100만원) 재매수
+    # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 >= prev_ma5) 동시 확인 시 재매수
     if (
         state["base_price"] is not None
         and curr_close > state["base_price"]
+        and curr_ma5 >= prev_ma5
         and state["remaining_ratio"] == 0
     ):
       entry_price = curr_close
@@ -459,8 +460,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
           "Ticker": ticker,
           "Event": "BUY (RE-ENTRY)",
           "Strategy": (
-              f"기준 가격({triggered_base_price}) 현재가 상향 돌파 -> 100만원"
-              " 재매수"
+              f"기준가({triggered_base_price}) 현재가 상향 돌파 & 5일선 상승 전환"
+              " -> 100만원 재매수"
           ),
           "Entry_Price": round(entry_price, 2),
       })
@@ -469,7 +470,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       SendMessage(
           f"<b>🚀 [BST 봇] 재매수 시그널 발생! (RE-ENTRY)</b>\n"
           f"• <b>종목</b>: {ticker}\n"
-          f"• <b>전략</b>: 이전 매도 기준가({triggered_base_price:,.1f}원) 현재가 상향 돌파\n"
+          f"• <b>전략</b>: 이전 매도 기준가({triggered_base_price:,.1f}원) 현재가 상향 돌파 + 5일선 상승 전환 확인\n"
           f"• <b>체결/진입가</b>: {entry_price:,.1f}원\n"
           f"• <b>매수 금액</b>: {ORDER_AMOUNT_KRW:,.0f}원 전액 재매수\n"
           f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"

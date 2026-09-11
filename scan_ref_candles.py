@@ -65,7 +65,7 @@ def save_state(state):
 
 
 def get_top_trading_volume_tickers(max_count=20, exclude_tickers=None):
-    """24시간 누적 거래대금(acc_trade_price_24h) 기준 상위 코인 정렬 추출"""
+    """어제 완전 마감된 일봉 1개(09:00~09:00)의 누적 거래대금 기준 상위 코인 정렬 추출"""
     if exclude_tickers is None:
         exclude_tickers = []
 
@@ -78,26 +78,36 @@ def get_top_trading_volume_tickers(max_count=20, exclude_tickers=None):
             if item["market"].startswith("KRW-")
         ]
 
-        ticker_data = []
-        chunk_size = 100
-        for i in range(0, len(krw_tickers), chunk_size):
-            chunk = krw_tickers[i : i + chunk_size]
-            url_ticker = f"https://api.upbit.com/v1/ticker?markets={','.join(chunk)}"
-            res_ticker = requests.get(url_ticker, timeout=5).json()
-            if isinstance(res_ticker, list):
-                ticker_data.extend(res_ticker)
+        ticker_volumes = []
 
-        # 24시간 누적 거래대금 내림차순 정렬
-        ticker_data.sort(key=lambda x: x.get("acc_trade_price_24h", 0), reverse=True)
+        for ticker in krw_tickers:
+            if ticker in exclude_tickers:
+                continue
+            try:
+                url_candle = f"https://api.upbit.com/v1/candles/days?market={ticker}&count=2"
+                res_candle = requests.get(url_candle, timeout=5).json()
+                if isinstance(res_candle, list) and len(res_candle) >= 2:
+                    # res_candle[0]은 당일 진행 캔들, res_candle[1]이 어제 마감된 1일봉 캔들
+                    yesterday_candle = res_candle[1]
+                    trade_price_krw = float(
+                        yesterday_candle.get(
+                            "candle_acc_trade_price",
+                            yesterday_candle.get("trade_price", 0)
+                            * yesterday_candle.get("candle_acc_trade_volume", 0),
+                        )
+                    )
+                    ticker_volumes.append((ticker, trade_price_krw))
+                time.sleep(0.04)  # 업비트 API 요청 간격 조절
+            except Exception:
+                continue
 
-        sorted_tickers = [
-            item["market"]
-            for item in ticker_data
-            if item["market"] not in exclude_tickers
-        ]
+        # 어제 일봉 누적 거래대금 내림차순 정렬
+        ticker_volumes.sort(key=lambda x: x[1], reverse=True)
+
+        sorted_tickers = [item[0] for item in ticker_volumes]
         return sorted_tickers[:max_count]
     except Exception as e:
-        print(f"[오류] 거래대금 상위 종목 조회 실패: {e}")
+        print(f"[오류] 전일 일봉 거래대금 상위 종목 조회 실패: {e}")
         return []
 
 
@@ -174,10 +184,13 @@ def scan_all_reference_candles():
             # 이미 활성 기준봉이 등록되어 감시 중이거나 포지션 보유 중인 코인은 스캔 건너뛰기(Skip)
             if ticker in global_state:
                 state = global_state[ticker]
-                if state.get("active_ref_date") or state.get("entry_bought", False):
+                if state.get("entry_bought", False):
+                    print(f"  [패스] {ticker} -> 현재 매수 포지션 보유 중 (스캔 건너뜀)")
+                    continue
+                elif state.get("active_ref_date"):
                     print(
-                        f"  [패스] {ticker} -> 이미 기준봉 감시 중 / 포지션 보유 중"
-                        f" (스캔 건너뜀, 기준일: {state.get('active_ref_date')})"
+                        f"  [패스] {ticker} -> 이미 기준봉 감시 중 (스캔 건너뜀, 기준일:"
+                        f" {state.get('active_ref_date')})"
                     )
                     continue
 
@@ -231,6 +244,18 @@ def scan_all_reference_candles():
                 wave_height = ref_high - swing_low_price
 
                 ref_date_str = latest_ref_idx.strftime("%Y-%m-%d")
+                curr_close = float(df.iloc[-1]["close"])
+
+                # [사전 필터링] 현재가가 손절가(기준봉 저가) 이하로 이미 이탈한 무효화된 기준봉은 등록하지 않고 무시
+                if curr_close < effective_ref_low:
+                    print(
+                        f"  [손절선 이탈 무시] {ticker} -> 기준일: {ref_date_str} |"
+                        f" 현재가({curr_close:,.1f}원) < 손절가({effective_ref_low:,.1f}원)"
+                        " (무효화된 기준봉 무시)"
+                    )
+                    if not state["entry_bought"]:
+                        state["active_ref_date"] = None
+                    continue
 
                 # 새로 발견되었거나 갱신된 기준봉 정보 업데이트
                 state["active_ref_date"] = ref_date_str

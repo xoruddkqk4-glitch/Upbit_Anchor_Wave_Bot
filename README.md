@@ -71,3 +71,15 @@
   - `python -m py_compile` 정적 구문 검사 통과 (Exit Code 0)
   - `scan_ref_candles.py` 실행 검증 완료 (거래대금 상위 20개 코인 정렬 및 텔레그램 메시지 발송 확인)
   - `Upbit_Anchor_Wave_Bot.py` 실행 검증 완료 (.env 환경변수 및 매매 시그널 텔레그램 알림 수신 확인)
+
+## 📝 [2026-09-11 20:42] 업데이트 이력 (Commit ID: 3f3d4cc)
+- **수정 내용**:
+  1. `scan_ref_candles.py`의 상위 코인 추출 로직을 전일 마감 일봉 1개(09:00~09:00)의 누적 거래대금(`candle_acc_trade_price`) 정렬 추출로 전환
+  2. 스캐너 포착 시 현재가가 손절가(기준봉 저가) 미만으로 하락한 무효화된 기준봉 사전 무시(필터링) 추가
+  3. 기준봉 매수(눌림목/돌파) 조건 검증 시 마감 확정 일봉(`df.iloc[-2]`) 종가/저가/양봉 여부 적용하여 윗꼬리 속임수 방지
+  4. 재매수(Re-Entry) 조건에 실시간 현재가 돌파 + **5일 이동평균선 상승 전환(`curr_ma5 >= prev_ma5`)** 확인을 추가하여 무한 매수-매도 핑퐁 버그 차단
+  5. 스캐너 건너뛰기 로그 문구 명확화 (기준봉 감시 중 vs 포지션 보유 중 구분 출력)
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `scan_ref_candles.py` 전일 마감 일봉 거래대금 20개 종목 정렬 및 사전 무시 필터링 동작 확인
+  - `Upbit_Anchor_Wave_Bot.py` 마감 일봉 확정 매수 & 5일선 상승 전환 재매수 로직 정상 동작 확인
