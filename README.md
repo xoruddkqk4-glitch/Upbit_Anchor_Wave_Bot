@@ -126,3 +126,15 @@
   - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
   - `python Upbit_Anchor_Wave_Bot.py` 메인 봇 모니터링 실행 검증 완료 (active 기준봉 12개 종목 정상 선별 감시 및 순수 눌림목 3차 매수 완료 시 저가 손절 유지 검증 완료)
 
+## 📝 [2026-09-11 21:45] 업데이트 이력 (Commit ID: 84b40d2)
+- **수정 내용**:
+  1. **감시 코인 20개 고정 설정**: `TARGET_TICKERS` 목록에 지정된 20개 주요 코인(XRP, BTC, ETH, SOL, DOGE, SUI, ADA, XLM, LINK, HBAR, ALGO, TRUMP, ONDO, WLD, NEAR, WAVES, NEO, QTUM, SHIB, PEPE)을 `scan_ref_candles.py` 및 `Upbit_Anchor_Wave_Bot.py`에 적용하여 스캔 및 감시 대상 고정
+  2. **종목당 최대 매수 금액 단독 설정**: `Upbit_Anchor_Wave_Bot.py` 상단에 `MAX_BUY_AMOUNT_KRW = 1000000` (100만원) 파라미터를 추가하여 직관적 금액 설정 연동
+  3. **일별 매매 기록 엑셀 자동 저장 및 실현 손익 추적**: 매수/매도 발생 시 실행 폴더 내 일별 엑셀 파일(`trade_history_YYYY-MM-DD.xlsx`)에 일시, 종목, 구분, 체결가, 수량, 거래금액, 평단가, **실현손익(원)**, **수익률(%)**, 사유를 자동 축적 기록하는 `save_trade_to_excel()` 구축
+  4. `.gitignore`에 `trade_history_*.xlsx` 및 `*.xlsx` 등록하여 자동 생성 엑셀 파일 깃 관리 제외 처리
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python scan_ref_candles.py` 20개 지정 종목 스캔 및 `bot_state.json` 저장 정상 검증 완료
+  - `python Upbit_Anchor_Wave_Bot.py` 20개 종목 5분 주기 감시 및 엑셀 자동 매매 기록(`save_trade_to_excel`) 정상 검증 완료
+
+

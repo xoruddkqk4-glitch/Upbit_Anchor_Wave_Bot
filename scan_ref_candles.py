@@ -39,7 +39,28 @@ EXCLUDE_TICKERS = [
     "KRW-SOLO",
     "KRW-XCORE",
 ]
-TARGET_TICKERS = None  # None: 거래대금 상위 코인 자동 추출
+TARGET_TICKERS = [
+    "KRW-XRP",
+    "KRW-BTC",
+    "KRW-ETH",
+    "KRW-SOL",
+    "KRW-DOGE",
+    "KRW-SUI",
+    "KRW-ADA",
+    "KRW-XLM",
+    "KRW-LINK",
+    "KRW-HBAR",
+    "KRW-ALGO",
+    "KRW-TRUMP",
+    "KRW-ONDO",
+    "KRW-WLD",
+    "KRW-NEAR",
+    "KRW-WAVES",
+    "KRW-NEO",
+    "KRW-QTUM",
+    "KRW-SHIB",
+    "KRW-PEPE",
+]  # 지정된 20개 감시 코인 목록
 
 
 def format_price(price: float, show_unit: bool = True) -> str:

@@ -29,9 +29,30 @@ AUTO_TRADE_EXECUTE = os.getenv("AUTO_TRADE_EXECUTE", "False").lower() in [
     "1",
 ]
 
-# 감시 종목 설정 (None: 업비트 원화 마켓 전체, 또는 특정 종목 지정 ['KRW-BTC', 'KRW-ETH'])
-TARGET_TICKERS = None
-MAX_TARGET_COUNT = 20  # 업비트 전체 대상일 때 감시할 최대 코인 개수 제한 (20개)
+# 감시 종목 설정 (지정된 20개 코인 감시)
+TARGET_TICKERS = [
+    "KRW-XRP",
+    "KRW-BTC",
+    "KRW-ETH",
+    "KRW-SOL",
+    "KRW-DOGE",
+    "KRW-SUI",
+    "KRW-ADA",
+    "KRW-XLM",
+    "KRW-LINK",
+    "KRW-HBAR",
+    "KRW-ALGO",
+    "KRW-TRUMP",
+    "KRW-ONDO",
+    "KRW-WLD",
+    "KRW-NEAR",
+    "KRW-WAVES",
+    "KRW-NEO",
+    "KRW-QTUM",
+    "KRW-SHIB",
+    "KRW-PEPE",
+]
+MAX_TARGET_COUNT = 20  # 감시할 최대 코인 개수 (20개)
 
 # 감시 및 매매 제외 종목 설정 (예: ['KRW-USDT', 'KRW-USDC'] 등 제외할 코인 지정)
 EXCLUDE_TICKERS = ["KRW-USDT", "KRW-USDC", "KRW-APENFT", "KRW-EHTW", "KRW-PEPPER", "KRW-SOLO", "KRW-XCORE"]
@@ -78,8 +99,9 @@ MIN_TAKE_PROFIT_PCT = 0.03  # 최소 보장 익절 수익률 (0.03 = +3%)
 # 손절가 자동 설정
 STOP_LOSS_BASE = "LOW"  # 세력 마진노선인 기준봉 저가(Low) 기반 자동 손절[cite: 3]
 
-# 주문 금액 및 시스템 설정 (최대 매수 금액 100만원)
-ORDER_AMOUNT_KRW = 1000000  # 종목당 총 매수 실행 금액 (100만원)
+# 주문 금액 및 시스템 설정 (종목당 최대 매수 금액 설정)
+MAX_BUY_AMOUNT_KRW = 1000000  # 종목당 최대 매수 실행 금액 (원 단위: 기본 100만원 = 1,000,000원)
+ORDER_AMOUNT_KRW = MAX_BUY_AMOUNT_KRW  # 종목당 총 매수 실행 금액
 API_DELAY_SEC = 0.1  # API 요청 간격 (초)
 
 # 상태 저장용 JSON 파일 경로
@@ -142,6 +164,80 @@ def save_state(state):
       json.dump(clean_state, f, ensure_ascii=False, indent=4)
   except Exception as e:
     print(f"[오류] 상태 파일 저장 실패: {e}")
+
+
+def save_trade_to_excel(
+    ticker: str,
+    trade_type: str,
+    event_name: str,
+    price: float,
+    volume: float,
+    amount_krw: float,
+    entry_price: float = 0.0,
+    realized_pnl_krw: float = 0.0,
+    return_pct: float = 0.0,
+    reason: str = "",
+):
+  """매매 체결 및 실현 손익 내역을 실행 폴더 내 일별 엑셀 파일(trade_history_YYYY-MM-DD.xlsx)에 자동 저장"""
+  try:
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    excel_file = f"trade_history_{date_str}.xlsx"
+
+    pnl_val = round(realized_pnl_krw) if trade_type == "매도" else 0
+    ret_val = round(return_pct * 100, 2) if trade_type == "매도" else 0.0
+
+    row_data = {
+        "일시": time_str,
+        "종목코드": ticker,
+        "구분": trade_type,
+        "매매 전략": event_name,
+        "체결가(원)": round(price, 8) if price < 1 else round(price, 2),
+        "체결수량": round(volume, 8),
+        "거래금액(원)": round(amount_krw),
+        "평단가(원)": (
+            round(entry_price, 8) if entry_price < 1 else round(entry_price, 2)
+        ),
+        "실현손익(원)": pnl_val,
+        "수익률(%)": ret_val,
+        "사유/비고": reason,
+    }
+
+    if os.path.exists(excel_file):
+      try:
+        df_existing = pd.read_excel(excel_file)
+        df_updated = pd.concat(
+            [df_existing, pd.DataFrame([row_data])], ignore_index=True
+        )
+      except Exception:
+        df_updated = pd.DataFrame([row_data])
+    else:
+      df_updated = pd.DataFrame([row_data])
+
+    with pd.ExcelWriter(excel_file, engine="openpyxl") as writer:
+      df_updated.to_excel(writer, index=False, sheet_name="매매기록")
+
+      worksheet = writer.sheets["매매기록"]
+      for col in worksheet.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        col_letter = col[0].column_letter
+        worksheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+    if trade_type == "매도":
+      print(
+          f" └ [엑셀 저장] '{excel_file}' 기록 완료 (실현손익: {pnl_val:+,.0f}원"
+          f" | 수익률: {ret_val:+.2f}%)"
+      )
+    else:
+      print(
+          f" └ [엑셀 저장] '{excel_file}' 기록 완료 (매수 금액:"
+          f" {round(amount_krw):,}원)"
+      )
+  except Exception as e:
+    print(f"[오류] 엑셀 매매 기록 저장 실패: {e}")
+
 
 
 # ==============================================================================
@@ -438,6 +534,16 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
     # [손절 체크] 기준봉 저가(마진노선) 이탈 시 데이터 초기화
     if curr_close < effective_ref_low:
       if state["remaining_ratio"] > 0 and state["entry_bought"]:
+        sell_vol = state["total_volume"] * state["remaining_ratio"]
+        buy_cost = state["entry_price"] * sell_vol
+        sell_amount = curr_close * sell_vol
+        realized_pnl = sell_amount - buy_cost
+        ret_pct = (
+            (curr_close - state["entry_price"]) / state["entry_price"]
+            if state["entry_price"] > 0
+            else 0.0
+        )
+
         signals.append({
             "Ticker": ticker,
             "Event": "SELL (STOP LOSS)",
@@ -450,12 +556,25 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             f"<b>🔴 [BST 봇] 손절 매도! (STOP LOSS)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>매도가</b>: {format_price(curr_close)}\n"
+            f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b>\n"
             f"• <b>사유</b>: 기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 -> 전량 손절 및 상태 초기화\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 
+        save_trade_to_excel(
+            ticker=ticker,
+            trade_type="매도",
+            event_name="SELL (STOP LOSS)",
+            price=curr_close,
+            volume=sell_vol,
+            amount_krw=sell_amount,
+            entry_price=state["entry_price"],
+            realized_pnl_krw=realized_pnl,
+            return_pct=ret_pct,
+            reason=f"기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 전량 손절",
+        )
+
         if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
-          sell_vol = state["total_volume"] * state["remaining_ratio"]
           upbit_client.sell_limit_with_slippage_protection(
               ticker=ticker, volume=sell_vol
           )
@@ -514,6 +633,20 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
           f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
       )
 
+      save_trade_to_excel(
+          ticker=ticker,
+          trade_type="매수",
+          event_name="BUY (RE-ENTRY)",
+          price=entry_price,
+          volume=total_volume,
+          amount_krw=ORDER_AMOUNT_KRW,
+          entry_price=entry_price,
+          reason=(
+              f"이전 매도 기준가({format_price(triggered_base_price)}) 상향 돌파"
+              " & 5일선 상승 전환 재매수"
+          ),
+      )
+
       if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
         upbit_client.buy_limit_with_slippage_protection(
             ticker=ticker, amount_krw=ORDER_AMOUNT_KRW
@@ -568,6 +701,17 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
+          save_trade_to_excel(
+              ticker=ticker,
+              trade_type="매수",
+              event_name="BUY (BREAKOUT ALL-IN)",
+              price=curr_close,
+              volume=state["total_volume"],
+              amount_krw=ORDER_AMOUNT_KRW,
+              entry_price=curr_close,
+              reason="마감확정일봉 기준봉 고가 완벽 상향 돌파 100% 전액 매수",
+          )
+
           if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
             upbit_client.buy_limit_with_slippage_protection(
                 ticker=ticker, amount_krw=ORDER_AMOUNT_KRW
@@ -594,6 +738,20 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>체결/진입가</b>: {format_price(curr_close)}\n"
               f"• <b>매수 금액</b>: {tranche_amount:,.0f}원 (1차 매수)\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+          )
+
+          save_trade_to_excel(
+              ticker=ticker,
+              trade_type="매수",
+              event_name=f"BUY (PULLBACK 1/{target_scale_in_steps})",
+              price=curr_close,
+              volume=state["total_volume"],
+              amount_krw=tranche_amount,
+              entry_price=curr_close,
+              reason=(
+                  "마감확정일봉 기준 중심가 이하 저가 터치 후 양봉 반등"
+                  f" 1/{target_scale_in_steps}차 분할 매수"
+              ),
           )
 
           if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
@@ -640,6 +798,17 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
+          save_trade_to_excel(
+              ticker=ticker,
+              trade_type="매수",
+              event_name="BUY (BREAKOUT FULL SCALE-IN)",
+              price=curr_close,
+              volume=add_volume,
+              amount_krw=remaining_amount,
+              entry_price=state["entry_price"],
+              reason="눌림목 진행 중 마감확정일봉 고가 돌파 잔액 전액 매수",
+          )
+
           if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
             upbit_client.buy_limit_with_slippage_protection(
                 ticker=ticker, amount_krw=remaining_amount
@@ -671,6 +840,20 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
+          save_trade_to_excel(
+              ticker=ticker,
+              trade_type="매수",
+              event_name=f"BUY (PULLBACK {state['scale_in_count']}/{target_scale_in_steps})",
+              price=curr_close,
+              volume=add_volume,
+              amount_krw=tranche_amount,
+              entry_price=state["entry_price"],
+              reason=(
+                  "마감확정일봉 눌림목 반등 추가"
+                  f" {state['scale_in_count']}/{target_scale_in_steps}차 분할 매수"
+              ),
+          )
+
           if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
             upbit_client.buy_limit_with_slippage_protection(
                 ticker=ticker, amount_krw=tranche_amount
@@ -696,6 +879,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         state["symmetry_tp_executed"] = True
         sell_vol = state["total_volume"] * 0.5
         state["remaining_ratio"] -= 0.5
+        buy_cost = entry_price * sell_vol
+        sell_amount = curr_close * sell_vol
+        realized_pnl = sell_amount - buy_cost
 
         signals.append({
             "Ticker": ticker,
@@ -710,8 +896,22 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>매도가</b>: {format_price(curr_close)}\n"
             f"• <b>수익률</b>: <b>{current_return * 100:+.2f}%</b>\n"
+            f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b>\n"
             f"• <b>사유</b>: 파동 시간/가격 대칭 목표 달성 (보유 수량 50% 익절)\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        )
+
+        save_trade_to_excel(
+            ticker=ticker,
+            trade_type="매도",
+            event_name="PARTIAL SELL (SYMMETRY 50%)",
+            price=curr_close,
+            volume=sell_vol,
+            amount_krw=sell_amount,
+            entry_price=entry_price,
+            realized_pnl_krw=realized_pnl,
+            return_pct=current_return,
+            reason="파동 시간/가격 대칭 목표 달성 (보유 수량 50% 익절)",
         )
 
         if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
@@ -722,6 +922,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       # B. 5일선 꺾임(하향 이탈) 체크 -> 잔여 전액 매도 후 기준 가격 기록
       if curr_ma5 < prev_ma5:
         sell_vol = state["total_volume"] * state["remaining_ratio"]
+        buy_cost = entry_price * sell_vol
+        sell_amount = curr_close * sell_vol
+        realized_pnl = sell_amount - buy_cost
+        ret_pct = (
+            (curr_close - entry_price) / entry_price if entry_price > 0 else 0.0
+        )
+
         state["remaining_ratio"] = 0.0
         state["base_price"] = curr_close
 
@@ -737,8 +944,26 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             f"<b>🟡 [BST 봇] 추세 매도! (MA5 DOWN)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>매도가</b>: {format_price(curr_close)}\n"
+            f"• <b>수익률</b>: <b>{ret_pct * 100:+.2f}%</b>\n"
+            f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b>\n"
             f"• <b>사유</b>: 5일선 하향 꺾임 -> 잔여 전액 매도 (기준가 {format_price(curr_close)} 기록)\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        )
+
+        save_trade_to_excel(
+            ticker=ticker,
+            trade_type="매도",
+            event_name="SELL (MA5 DOWN)",
+            price=curr_close,
+            volume=sell_vol,
+            amount_krw=sell_amount,
+            entry_price=entry_price,
+            realized_pnl_krw=realized_pnl,
+            return_pct=ret_pct,
+            reason=(
+                f"5일선 하향 꺾임 잔여 전액 매도 (기준가 {format_price(curr_close)}"
+                " 기록)"
+            ),
         )
 
         if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
