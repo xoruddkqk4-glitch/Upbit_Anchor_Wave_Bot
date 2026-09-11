@@ -5,27 +5,36 @@ import os
 import time
 import urllib.parse
 import uuid
+from dotenv import load_dotenv
 import jwt
 import numpy as np
 import pandas as pd
 import requests
+from telegram_alert import SendMessage
+
+# 프로젝트 경로의 .env 명시적 로드
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ==============================================================================
 # [1. 사용자 설정 및 옵션 파라미터 (Top Options)]
 # ==============================================================================
 
-# 업비트 API 키 (실제 자동매매 사용 시 입력, 스캔 전용 실행 시 빈 문자열 유지)
-UPBIT_ACCESS_KEY = "YOUR_UPBIT_ACCESS_KEY"
-UPBIT_SECRET_KEY = "YOUR_SECRET_KEY"
+# 업비트 API 키 (.env 파일 우선 적용, 없으면 기본값 사용)
+UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "").strip()
+UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "").strip()
 
-# 매매 및 실행 모드 설정
-AUTO_TRADE_EXECUTE = (
-    False  # False: 스캔/분석 결과 출력 모드, True: 실제 업비트 자동 주문 실행
-)
+# 매매 및 실행 모드 설정 (.env의 UPBIT_PAPER_TRADING=False 인 경우 실주문 모드 전환, 기본값 False=스캔/모의 모드)
+AUTO_TRADE_EXECUTE = os.getenv("AUTO_TRADE_EXECUTE", "False").lower() in [
+    "true",
+    "1",
+]
 
 # 감시 종목 설정 (None: 업비트 원화 마켓 전체, 또는 특정 종목 지정 ['KRW-BTC', 'KRW-ETH'])
 TARGET_TICKERS = None
 MAX_TARGET_COUNT = 20  # 업비트 전체 대상일 때 감시할 최대 코인 개수 제한 (20개)
+
+# 감시 및 매매 제외 종목 설정 (예: ['KRW-USDT', 'KRW-USDC'] 등 제외할 코인 지정)
+EXCLUDE_TICKERS = ["KRW-USDT", "KRW-USDC", "KRW-APENFT", "KRW-EHTW", "KRW-PEPPER", "KRW-SOLO", "KRW-XCORE"]
 
 # 슬리피지 방지 및 지정가 미체결 취소 옵션
 MAX_SLIPPAGE_PCT = (
@@ -388,16 +397,26 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
     wave_height = state["wave_height"]
     rise_duration = state["rise_duration"]
 
-    # [손절 체크] 기준봉 저가(마진노선) 이탈 시 데이터 초기화[cite: 3]
+    # [손절 체크] 기준봉 저가(마진노선) 이탈 시 데이터 초기화
     if curr_close < effective_ref_low:
       if state["remaining_ratio"] > 0 and state["entry_bought"]:
         signals.append({
             "Ticker": ticker,
             "Event": "SELL (STOP LOSS)",
             "Price": curr_close,
-            "Reason": "기준봉 손절가(마진노선) 이탈 -> 기준 가격 데이터 초기화[cite: 3]",
+            "Reason": "기준봉 손절가(마진노선) 이탈 -> 기준 가격 데이터 초기화",
         })
-        if AUTO_TRADE_EXECUTE and upbit_client:
+
+        # 텔레그램 손절 매도 알림
+        SendMessage(
+            f"<b>🔴 [BST 봇] 손절 매도! (STOP LOSS)</b>\n"
+            f"• <b>종목</b>: {ticker}\n"
+            f"• <b>매도가</b>: {curr_close:,.1f}원\n"
+            f"• <b>사유</b>: 기준봉 저가({effective_ref_low:,.1f}원) 하향 이탈 -> 전량 손절 및 상태 초기화\n"
+            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        )
+
+        if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
           sell_vol = state["total_volume"] * state["remaining_ratio"]
           upbit_client.sell_limit_with_slippage_protection(
               ticker=ticker, volume=sell_vol
@@ -446,7 +465,17 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
           "Entry_Price": round(entry_price, 2),
       })
 
-      if AUTO_TRADE_EXECUTE and upbit_client:
+      # 텔레그램 재매수 알림
+      SendMessage(
+          f"<b>🚀 [BST 봇] 재매수 시그널 발생! (RE-ENTRY)</b>\n"
+          f"• <b>종목</b>: {ticker}\n"
+          f"• <b>전략</b>: 이전 매도 기준가({triggered_base_price:,.1f}원) 현재가 상향 돌파\n"
+          f"• <b>체결/진입가</b>: {entry_price:,.1f}원\n"
+          f"• <b>매수 금액</b>: {ORDER_AMOUNT_KRW:,.0f}원 전액 재매수\n"
+          f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+      )
+
+      if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
         upbit_client.buy_limit_with_slippage_protection(
             ticker=ticker, amount_krw=ORDER_AMOUNT_KRW
         )
@@ -486,15 +515,25 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               + (curr_close * add_volume)
           ) / state["total_volume"]
 
+        event_name = (
+            "BUY (SCALE-IN)" if state["scale_in_count"] > 1 else "BUY"
+        )
         signals.append({
             "Ticker": ticker,
-            "Event": (
-                "BUY (SCALE-IN)" if state["scale_in_count"] > 1 else "BUY"
-            ),
+            "Event": event_name,
             "Entry_Price": round(state["entry_price"], 2),
         })
 
-        if AUTO_TRADE_EXECUTE and upbit_client:
+        # 텔레그램 매수 알림
+        SendMessage(
+            f"<b>🔵 [BST 봇] 매수 시그널 발생! ({'분할 매수' if state['scale_in_count'] > 1 else '신규 매수'})</b>\n"
+            f"• <b>종목</b>: {ticker}\n"
+            f"• <b>체결/진입가</b>: {curr_close:,.1f}원 (평단가: {state['entry_price']:,.1f}원)\n"
+            f"• <b>매수 단계</b>: {state['scale_in_count']}/{target_scale_in_steps}차 분할 매수\n"
+            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        )
+
+        if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
           tranche_amount = ORDER_AMOUNT_KRW / target_scale_in_steps
           upbit_client.buy_limit_with_slippage_protection(
               ticker=ticker, amount_krw=tranche_amount
@@ -505,7 +544,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       entry_price = state["entry_price"]
       current_return = (curr_close - entry_price) / entry_price
 
-      # A. 대칭 조건 만족 시 보유량의 50% 익절[cite: 2]
+      # A. 대칭 조건 만족 시 보유량의 50% 익절
       is_time_symmetric_exit = USE_TIME_SYMMETRY_EXIT and (
           current_return >= MIN_TAKE_PROFIT_PCT
       )
@@ -525,10 +564,20 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             "Ticker": ticker,
             "Event": "PARTIAL SELL (SYMMETRY 50%)",
             "Return(%)": round(current_return * 100, 2),
-            "Reason": "대칭 조건 달성 -> 50% 익절 완료[cite: 2]",
+            "Reason": "대칭 조건 달성 -> 50% 익절 완료",
         })
 
-        if AUTO_TRADE_EXECUTE and upbit_client:
+        # 텔레그램 50% 분할 익절 알림
+        SendMessage(
+            f"<b>🟢 [BST 봇] 50% 분할 익절! (PARTIAL SELL)</b>\n"
+            f"• <b>종목</b>: {ticker}\n"
+            f"• <b>매도가</b>: {curr_close:,.1f}원\n"
+            f"• <b>수익률</b>: <b>{current_return * 100:+.2f}%</b>\n"
+            f"• <b>사유</b>: 파동 시간/가격 대칭 목표 달성 (보유 수량 50% 익절)\n"
+            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        )
+
+        if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
           upbit_client.sell_limit_with_slippage_protection(
               ticker=ticker, volume=sell_vol
           )
@@ -546,7 +595,16 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             "Reason": f"5일선 꺾임 전액 매도 -> 기준 가격 기록: {curr_close}",
         })
 
-        if AUTO_TRADE_EXECUTE and upbit_client:
+        # 텔레그램 5일선 추세 매도 알림
+        SendMessage(
+            f"<b>🟡 [BST 봇] 추세 매도! (MA5 DOWN)</b>\n"
+            f"• <b>종목</b>: {ticker}\n"
+            f"• <b>매도가</b>: {curr_close:,.1f}원\n"
+            f"• <b>사유</b>: 5일선 하향 꺾임 -> 잔여 전액 매도 (기준가 {curr_close:,.1f}원 기록)\n"
+            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        )
+
+        if AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key:
           upbit_client.sell_limit_with_slippage_protection(
               ticker=ticker, volume=sell_vol
           )
@@ -564,15 +622,16 @@ def run_market_scan():
   global_state = load_state()
   client = UpbitClient(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)
 
-  # 09:07 스캐너에 의해 기준봉이 포착되었거나(active_ref_date 존재) 매수 포지션이 존재하는 종목만 선별
+  # 09:07 스캐너에 의해 기준봉이 포착되었거나(active_ref_date 존재) 매수 포지션이 존재하는 종목 중 제외 코인 빼고 선별
   active_tickers = [
       ticker
       for ticker, st in global_state.items()
-      if st.get("active_ref_date") is not None or st.get("entry_bought", False)
+      if (st.get("active_ref_date") is not None or st.get("entry_bought", False))
+      and ticker not in EXCLUDE_TICKERS
   ]
 
   if TARGET_TICKERS:
-    tickers = TARGET_TICKERS
+    tickers = [t for t in TARGET_TICKERS if t not in EXCLUDE_TICKERS]
   else:
     tickers = active_tickers
 

@@ -59,3 +59,15 @@
   - `python -m py_compile` 정적 구문 검사 통과 (Exit Code 0)
   - `python scan_ref_candles.py` 09:07 스캐너 테스트 완료 (기준봉 종목 포착 및 `bot_state.json` 정상 생성 확인)
   - `python Upbit_Anchor_Wave_Bot.py` 메인 봇 테스트 완료 (공유된 기준봉 종목 선별 감시 및 시그널 정상 수집 확인)
+
+## 📝 [2026-09-11 20:25] 업데이트 이력 (Commit ID: 4e4ff5e)
+- **수정 내용**:
+  1. `scan_ref_candles.py`에 이미 활성 기준봉이 있거나 포지션 보유 중인 종목 스캔 건너뛰기(Skip) 로직 반영
+  2. 업비트 24시간 누적 거래대금(`acc_trade_price_24h`) 기준 상위 20개 코인 자동 정렬 추출 기능 구현
+  3. `EXCLUDE_TICKERS` 감시 제외 목록(`KRW-USDT`, `KRW-USDC`, `KRW-APENFT`, `KRW-EHTW`, `KRW-PEPPER`, `KRW-SOLO`, `KRW-XCORE`) 추가 및 필터링 적용
+  4. `.env` 환경변수 자동 로드 및 텔레그램 메세지(`telegram_alert.py`) 매매 시그널 자동 발송 연동
+  5. `.env` 파일 내 `AUTO_TRADE_EXECUTE=False` 명시로 안전한 모의(시뮬레이션) 트레이딩 환경 구축
+- **검증 결과**:
+  - `python -m py_compile` 정적 구문 검사 통과 (Exit Code 0)
+  - `scan_ref_candles.py` 실행 검증 완료 (거래대금 상위 20개 코인 정렬 및 텔레그램 메시지 발송 확인)
+  - `Upbit_Anchor_Wave_Bot.py` 실행 검증 완료 (.env 환경변수 및 매매 시그널 텔레그램 알림 수신 확인)
