@@ -1311,8 +1311,12 @@ def detect_reference_candles(df):
   return df
 
 
-def process_ticker_strategy(ticker, df, upbit_client, global_state):
-  """개선된 BST 전략을 반영한 단일 종목 실시간 모니터링 및 매매 집행"""
+def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=True):
+  """개선된 BST 전략을 반영한 단일 종목 실시간 모니터링 및 매매 집행
+
+  allow_entry=False면 신규 진입·분할 추가·재매수 등 모든 매수 분기를 건너뛰고
+  손절·대칭 익절·5일선 매도 등 매도 감시만 수행한다 (유의종목 등 제외 종목의 보유 포지션용).
+  """
   df = detect_reference_candles(df)
 
   if ticker not in global_state:
@@ -1477,7 +1481,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
 
     # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 >= prev_ma5) 동시 확인 시 재매수
     if (
-        state["base_price"] is not None
+        allow_entry
+        and state["base_price"] is not None
         and curr_close > state["base_price"]
         and curr_ma5 >= prev_ma5
         and state["remaining_ratio"] == 0
@@ -1534,11 +1539,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             ),
         )
 
-    # [진입 및 매수 체크]
-    if not state["entry_bought"] or (
-        ENABLE_SCALE_IN_BUY
-        and state["scale_in_count"] < target_scale_in_steps
-        and state["remaining_ratio"] > 0
+    # [진입 및 매수 체크] (allow_entry=False면 매도 감시만 수행하므로 전체 건너뜀)
+    if allow_entry and (
+        not state["entry_bought"]
+        or (
+            ENABLE_SCALE_IN_BUY
+            and state["scale_in_count"] < target_scale_in_steps
+            and state["remaining_ratio"] > 0
+        )
     ):
       is_pullback = False
       if ENABLE_PULLBACK_ENTRY:
@@ -1936,6 +1944,34 @@ def get_upbit_warning_tickers():
     return []
 
 
+def select_monitor_tickers(global_state, combined_exclude):
+  """감시 대상 선별 -> (감시 종목 목록, 매도 감시만 수행할 보유 제외 종목 목록)
+
+  제외 종목(유의종목·EXCLUDE_TICKERS)은 신규 진입 대상에서 빼되, 이미 보유 중인 포지션은
+  손절·대칭·5일선 매도 감시가 끊기지 않도록 목록에 유지한다. 유의종목 지정은 보통 급등락
+  직후라, 이때 감시가 멈추면 가장 위험한 순간에 포지션이 방치된다.
+  (매수 분기는 호출부에서 allow_entry=False로 차단)
+  """
+  held_excluded = [
+      t
+      for t, st in global_state.items()
+      if st.get("entry_bought", False)
+      and st.get("remaining_ratio", 0) > 0
+      and t in combined_exclude
+  ]
+  if TARGET_TICKERS:
+    base = [t for t in TARGET_TICKERS if t not in combined_exclude]
+  else:
+    base = [
+        t
+        for t, st in global_state.items()
+        if (st.get("active_ref_date") is not None or st.get("entry_bought", False))
+        and t not in combined_exclude
+    ]
+  tickers = base + [t for t in held_excluded if t not in base]
+  return tickers, held_excluded
+
+
 def run_market_scan():
   """5분마다 실행되어 09:07 스캐너(scan_ref_candles.py)가 공유한 활성 기준봉 종목만 실시간 점검"""
   global_state = load_state()
@@ -1947,17 +1983,7 @@ def run_market_scan():
   combined_exclude = set(EXCLUDE_TICKERS + warning_tickers)
 
   # 09:07 스캐너에 의해 기준봉이 포착되었거나(active_ref_date 존재) 매수 포지션이 존재하는 종목 중 제외 코인 빼고 선별
-  active_tickers = [
-      ticker
-      for ticker, st in global_state.items()
-      if (st.get("active_ref_date") is not None or st.get("entry_bought", False))
-      and ticker not in combined_exclude
-  ]
-
-  if TARGET_TICKERS:
-    tickers = [t for t in TARGET_TICKERS if t not in combined_exclude]
-  else:
-    tickers = active_tickers
+  tickers, held_excluded = select_monitor_tickers(global_state, combined_exclude)
 
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("\n" + "=" * 80)
@@ -1967,6 +1993,11 @@ def run_market_scan():
   )
   if tickers:
     print(f"  [리스트] 감시 종목 목록: {tickers}")
+    if held_excluded:
+      print(
+          "  [매도 감시만] 제외/유의 종목 보유 중 -> 신규·추가·재매수 차단, 매도만 감시:"
+          f" {held_excluded}"
+      )
   else:
     print("  [안내] 현재 포착된 활성 기준봉 종목이 없습니다. (09:07 스캐너 대기 중)")
   print("=" * 80)
@@ -1977,7 +2008,13 @@ def run_market_scan():
     try:
       df = client.get_daily_ohlcv(ticker, count=CANDLE_COUNT)
       if df is not None and len(df) >= 30:
-        signals = process_ticker_strategy(ticker, df, client, global_state)
+        signals = process_ticker_strategy(
+            ticker,
+            df,
+            client,
+            global_state,
+            allow_entry=ticker not in combined_exclude,
+        )
         if signals:
           all_signals.extend(signals)
       time.sleep(API_DELAY_SEC)

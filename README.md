@@ -228,3 +228,17 @@
   - **2번 시나리오 5종**: ①어제 돌파·오늘 114 갭하락 → 진입 없음 ②정상 돌파(돌파봉 저가 114, 진입 121) → 손절 114.95(`상한 적용`, 114는 -5.8%), 다음 틱 손절 없음 ③갭상승 돌파봉(저가 116.5) → 손절 116.5(`직전 확정봉 저가`) ④눌림목 1/3 보유 중 돌파 잔액 매수 → 평단 116.33, 손절 114.0(평단 대비 -2%), 기존 99.5에서 상향 ⑤헬퍼 단독: 기존 손절선이 더 높으면 유지
   - `.env`, `service_account.json` 미추적 재확인, `AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출
   - **설계 판단(검토 요청 사항)**: (a) `BREAKOUT_MAX_LOSS_PCT=0.05`는 기본값이며 평범한 돌파봉에서 상한이 자주 걸리면 0.06~0.07로 조정 가능. (b) 손절 판정은 여전히 5분 장중 가격 기준. 확정봉(일봉 마감) 기준 판정은 5일선 매도(9번)와 묶어 일괄 전환 예정. (c) 알림의 `114.9원` 표시는 기존 `format_price` 반올림이며 상태에는 114.95가 저장됨
+
+## 📝 [2026-09-12 13:36] 업데이트 이력 (Commit ID: __COMMIT_HASH__)
+- **수정 내용** (`Upbit_Anchor_Wave_Bot.py`): **유의/제외 종목 보유 시 매도 감시 유지**
+  - 기존에는 `tickers = [t for t in TARGET_TICKERS if t not in combined_exclude]`로 유의종목(`warning`)과 `EXCLUDE_TICKERS`를 감시 목록에서 통째로 제외해, **보유 중인 코인이 유의종목으로 지정되면 손절·대칭 익절·5일선 매도 로직이 전부 중단**되어 포지션이 방치되던 문제를 수정. 유의 지정은 보통 급등락 직후라 가장 위험한 순간에 감시가 끊기는 구조였음
+  - `process_ticker_strategy(..., allow_entry=True)` 매개변수 추가. `False`면 재매수·신규 진입·분할 추가 매수 세 분기를 모두 건너뛰고 매도 감시만 수행
+  - `select_monitor_tickers(global_state, combined_exclude)` 헬퍼 신설: 기존 인라인 선별 로직을 추출하고, 제외 종목이라도 **실제 보유 중**(`entry_bought and remaining_ratio > 0`)이면 감시 목록에 유지하며 `held_excluded`로 별도 반환. 미보유 제외 종목은 기존처럼 완전 제외
+  - `run_market_scan`: 헬퍼 호출로 교체, 호출부에 `allow_entry=ticker not in combined_exclude` 전달, 실행 로그에 `[매도 감시만]` 대상 목록 출력
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **선별 헬퍼**: 보유·제외(DOGE) → 목록 포함 + `held_excluded=['KRW-DOGE']`, 미보유·제외(SHIB) → 제외, 중복 없음
+  - **`allow_entry=False` 시나리오 4종**(전략 함수 실제 실행, 알림·시트 스텁): ①손절선 이탈 → `SELL (STOP LOSS)` 정상 ②5일선 꺾임 → `SELL (MA5 DOWN)` 정상 ③실제 눌림목 → **매수 없음**(같은 데이터에 기본값이면 `BUY (PULLBACK 1/3)`) ④기준가 돌파+MA5 상승 → **재매수 없음**, `base_price` 유지(기본값이면 `BUY (RE-ENTRY)`)
+  - `.env`, `service_account.json` 미추적 재확인, `AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출
+  - **미수행 항목**: `run_market_scan` 자체는 네트워크가 필요해 직접 실행하지 않음. 선별 로직을 헬퍼로 분리한 이유가 이 부분의 오프라인 검증을 위해서임
+  - **참고**: 유의종목 보유 중 매도가 부분 체결로 끝나면 `remaining_ratio > 0`이 유지되어 다음 주기에도 계속 감시됨(의도된 동작)
