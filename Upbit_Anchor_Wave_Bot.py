@@ -1301,11 +1301,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
     global_state[ticker] = {
         "active_ref_date": None,
         "entry_bought": False,
+        "entry_date": None,
         "entry_price": 0.0,
         "total_volume": 0.0,
         "remaining_ratio": 1.0,
         "symmetry_tp_executed": False,
         "scale_in_count": 0,
+        "last_scale_in_date": None,
         "base_price": None,
         "ref_high": 0.0,
         "effective_ref_low": 0.0,
@@ -1322,6 +1324,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
   curr_low = curr_row["low"]
   curr_ma5 = df["MA5"].iloc[-1]
   prev_ma5 = df["MA5"].iloc[-2] if len(df) >= 2 else curr_ma5
+  # 진행 중인 일봉의 기준일(업비트 09:00 KST 마감 기준). 분할 매수 1일 1회 제한에 사용
+  curr_candle_date = curr_row.name.strftime("%Y-%m-%d")
 
   # 마감 확정된 전일 일봉 (09:00 마감 완결 캔들 - 스윙/휩소 방지용)
   confirmed_row = df.iloc[-2] if len(df) >= 2 else curr_row
@@ -1434,11 +1438,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       global_state[ticker] = {
           "active_ref_date": None,
           "entry_bought": False,
+          "entry_date": None,
           "entry_price": 0.0,
           "total_volume": 0.0,
           "remaining_ratio": 1.0,
           "symmetry_tp_executed": False,
           "scale_in_count": 0,
+          "last_scale_in_date": None,
           "base_price": None,
           "ref_high": 0.0,
           "effective_ref_low": 0.0,
@@ -1447,6 +1453,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
           "wave_height": 0.0,
       }
       return signals
+
+    target_scale_in_steps = 3 if ENABLE_SCALE_IN_BUY else 1
 
     # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 >= prev_ma5) 동시 확인 시 재매수
     if (
@@ -1465,6 +1473,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         state["total_volume"] = total_volume
         state["remaining_ratio"] = 1.0
         state["symmetry_tp_executed"] = False
+        state["entry_date"] = curr_candle_date  # 2차 파동 기점 (기간 대칭 기준일)
+        # 최대 금액 전액 재매수이므로 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
+        # (이전 사이클이 1/3만 진입한 채 5일선에 팔린 경우, 재매수 후 눌림목 조건에 걸리면
+        #  2/3가 더 들어가 133만원이 되는 과매수 경로 차단). 이후는 매도 로직만 동작.
+        state["scale_in_count"] = target_scale_in_steps
         triggered_base_price = state["base_price"]
         state["base_price"] = None
 
@@ -1503,7 +1516,6 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         )
 
     # [진입 및 매수 체크]
-    target_scale_in_steps = 3 if ENABLE_SCALE_IN_BUY else 1
     if not state["entry_bought"] or (
         ENABLE_SCALE_IN_BUY
         and state["scale_in_count"] < target_scale_in_steps
@@ -1517,6 +1529,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             (confirmed_close > confirmed_open) if REQUIRE_BULLISH_REBOUND else True
         )
         is_pullback = price_cond and rebound_cond
+
+      # 눌림목 조건은 마감 확정일봉 기준이라 하루 종일 값이 고정된다.
+      # 가드가 없으면 5분 주기마다 재평가되어 같은 날 3회차까지 연속 체결되므로,
+      # 분할 매수는 일봉 기준일당 1회로 제한한다 (체결 성공 시에만 날짜 기록).
+      can_scale_in_today = state.get("last_scale_in_date") != curr_candle_date
 
       is_breakout = False
       if ENABLE_BREAKOUT_ENTRY:
@@ -1534,6 +1551,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             state["total_volume"] = fill["volume"]
             state["remaining_ratio"] = 1.0
             state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
+            state["entry_date"] = curr_candle_date  # 2차 파동 기점 (기간 대칭 기준일)
             prev_low = state["effective_ref_low"]
             state["effective_ref_low"] = ref_high  # 손절선을 돌파가(고가)로 상향 재조정
 
@@ -1574,6 +1592,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             state["total_volume"] = fill["volume"]
             state["remaining_ratio"] = 1.0
             state["scale_in_count"] = 1
+            state["last_scale_in_date"] = curr_candle_date  # 1일 1회 분할 매수 제한
+            state["entry_date"] = curr_candle_date  # 2차 파동 기점 (기간 대칭 기준일, 추가 매수 시 유지)
 
             signals.append({
                 "Ticker": ticker,
@@ -1656,12 +1676,15 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
                 reason="눌림목 진행 중 마감확정일봉 고가 돌파 잔액 전액 매수",
             )
 
-        elif is_pullback:
+        elif is_pullback and can_scale_in_today:
           # 2) 순수 추가 눌림목 조건 만족 시: 1/3 금액만큼 다음 회차 분할 매수 진행
+          # (같은 확정봉 기준으로 하루 내내 조건이 유지되므로, 1일 1회로 제한해
+          #  5분 주기마다 연속 체결되는 것을 방지)
           tranche_amount = ORDER_AMOUNT_KRW / target_scale_in_steps
           fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
           if fill["ok"]:
             state["scale_in_count"] += 1
+            state["last_scale_in_date"] = curr_candle_date
             add_volume = fill["volume"]
             old_volume = state["total_volume"]
 
@@ -1704,14 +1727,42 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       entry_price = state["entry_price"]
       current_return = (curr_close - entry_price) / entry_price
 
-      # A. 대칭 조건 만족 시 보유량의 50% 익절
-      is_time_symmetric_exit = USE_TIME_SYMMETRY_EXIT and (
-          current_return >= MIN_TAKE_PROFIT_PCT
-      )
-      is_price_symmetric_exit = USE_PRICE_SYMMETRY_EXIT and (
-          curr_close >= (entry_price + wave_height)
+      # A. 대칭이론 조건 만족 시 보유량의 50% 익절
+      #    1차 파동(스윙 저점 -> 기준봉 고가)의 높이(wave_height)와 기간(rise_duration)을
+      #    2차 파동(진입 이후)에 그대로 투영한다. 둘 중 먼저 도달하는 조건에서 익절하며,
+      #    MIN_TAKE_PROFIT_PCT는 공통 하한(손실 상태에서 시간만 지났다고 팔지 않도록).
+      if not state.get("entry_date"):
+        # 구버전 상태 파일 호환: 진입일 미기록 포지션은 현재 일봉부터 기간 카운트 시작
+        state["entry_date"] = curr_candle_date
+      days_since_entry = (
+          pd.Timestamp(curr_candle_date) - pd.Timestamp(state["entry_date"])
+      ).days
+      # 허용오차만큼 앞당겨 발동 가능하되, 진입 당일(0일) 발동은 배제
+      time_target_days = max(rise_duration - TIME_SYMMETRY_TOLERANCE_DAYS, 1)
+      price_target = entry_price + wave_height
+
+      is_time_symmetric_exit = (
+          USE_TIME_SYMMETRY_EXIT
+          and days_since_entry >= time_target_days
           and current_return >= MIN_TAKE_PROFIT_PCT
       )
+      is_price_symmetric_exit = (
+          USE_PRICE_SYMMETRY_EXIT
+          and curr_close >= price_target
+          and current_return >= MIN_TAKE_PROFIT_PCT
+      )
+      if is_price_symmetric_exit:
+        symmetry_reason = (
+            f"가격 대칭 달성: 1차 파동 높이 {format_price(wave_height)} 투영 목표가"
+            f" {format_price(price_target)} 도달"
+        )
+      elif is_time_symmetric_exit:
+        symmetry_reason = (
+            f"기간 대칭 달성: 1차 파동 {rise_duration}일 대비 진입 후"
+            f" {days_since_entry}일 경과 (허용오차 ±{TIME_SYMMETRY_TOLERANCE_DAYS}일)"
+        )
+      else:
+        symmetry_reason = ""
 
       if (
           is_time_symmetric_exit or is_price_symmetric_exit
@@ -1739,7 +1790,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               "Ticker": ticker,
               "Event": "PARTIAL SELL (SYMMETRY 50%)",
               "Return(%)": round(realized_return * 100, 2),
-              "Reason": "대칭 조건 달성 -> 50% 익절 완료",
+              "Reason": f"{symmetry_reason} -> 50% 익절 완료",
           })
 
           # 텔레그램 50% 분할 익절 알림
@@ -1749,7 +1800,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>매도가</b>: {format_price(sell_price)}\n"
               f"• <b>수익률</b>: <b>{realized_return * 100:+.2f}%</b>\n"
               f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b>\n"
-              f"• <b>사유</b>: 파동 시간/가격 대칭 목표 달성 (보유 수량 50% 익절)"
+              f"• <b>사유</b>: {symmetry_reason} (보유 수량 50% 익절)\n"
+              f"• <b>대칭 목표</b>: 가격 {format_price(price_target)} / 기간 {rise_duration}일 (진입 후 {days_since_entry}일 경과)"
               f"{fill_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
@@ -1764,7 +1816,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               entry_price=entry_price,
               realized_pnl_krw=realized_pnl,
               return_pct=realized_return,
-              reason="파동 시간/가격 대칭 목표 달성 (보유 수량 50% 익절)",
+              reason=f"{symmetry_reason} (보유 수량 50% 익절)",
           )
 
       # B. 5일선 꺾임(하향 이탈) 체크 -> 잔여 전액 매도 후 기준 가격 기록
