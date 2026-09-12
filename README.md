@@ -229,7 +229,7 @@
   - `.env`, `service_account.json` 미추적 재확인, `AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출
   - **설계 판단(검토 요청 사항)**: (a) `BREAKOUT_MAX_LOSS_PCT=0.05`는 기본값이며 평범한 돌파봉에서 상한이 자주 걸리면 0.06~0.07로 조정 가능. (b) 손절 판정은 여전히 5분 장중 가격 기준. 확정봉(일봉 마감) 기준 판정은 5일선 매도(9번)와 묶어 일괄 전환 예정. (c) 알림의 `114.9원` 표시는 기존 `format_price` 반올림이며 상태에는 114.95가 저장됨
 
-## 📝 [2026-09-12 13:36] 업데이트 이력 (Commit ID: __COMMIT_HASH__)
+## 📝 [2026-09-12 13:36] 업데이트 이력 (Commit ID: 50459e1)
 - **수정 내용** (`Upbit_Anchor_Wave_Bot.py`): **유의/제외 종목 보유 시 매도 감시 유지**
   - 기존에는 `tickers = [t for t in TARGET_TICKERS if t not in combined_exclude]`로 유의종목(`warning`)과 `EXCLUDE_TICKERS`를 감시 목록에서 통째로 제외해, **보유 중인 코인이 유의종목으로 지정되면 손절·대칭 익절·5일선 매도 로직이 전부 중단**되어 포지션이 방치되던 문제를 수정. 유의 지정은 보통 급등락 직후라 가장 위험한 순간에 감시가 끊기는 구조였음
   - `process_ticker_strategy(..., allow_entry=True)` 매개변수 추가. `False`면 재매수·신규 진입·분할 추가 매수 세 분기를 모두 건너뛰고 매도 감시만 수행
