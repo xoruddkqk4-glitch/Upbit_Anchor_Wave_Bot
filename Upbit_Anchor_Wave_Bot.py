@@ -108,6 +108,7 @@ MIN_TAKE_PROFIT_PCT = 0.03  # 최소 보장 익절 수익률 (0.03 = +3%)
 
 # 손절가 자동 설정
 STOP_LOSS_BASE = "LOW"  # 세력 마진노선인 기준봉 저가(Low) 기반 자동 손절[cite: 3]
+BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 진입 손절선 상한: 직전 확정봉 저가가 이보다 멀면 진입가 -5%로 제한 (전액 포지션 단일 최대 손실 통제)
 
 # 주문 금액 및 시스템 설정 (종목당 최대 매수 금액 설정)
 MAX_BUY_AMOUNT_KRW = 1000000  # 종목당 최대 매수 실행 금액 (원 단위: 기본 100만원 = 1,000,000원)
@@ -1260,6 +1261,23 @@ def execute_sell(upbit_client, ticker, volume, fallback_price):
   return fill
 
 
+def calc_breakout_stop(confirmed_low, entry_price, current_stop):
+  """돌파 진입 손절선 산출 -> (손절가, 산출 근거)
+
+  기본은 직전 확정봉(돌파를 확정한 마감 일봉) 저가. 아래서 치고 올라온 장대 돌파봉은
+  저가가 지나치게 멀 수 있어 진입가 대비 BREAKOUT_MAX_LOSS_PCT를 상한으로 둔다.
+  손절선은 위로만 이동하므로 기존 손절선보다 낮아지지는 않는다.
+  """
+  cap = entry_price * (1 - BREAKOUT_MAX_LOSS_PCT)
+  if cap > confirmed_low:
+    stop, basis = cap, f"진입가 -{BREAKOUT_MAX_LOSS_PCT:.0%} 상한 적용"
+  else:
+    stop, basis = confirmed_low, "직전 확정봉 저가"
+  if current_stop > stop:
+    stop, basis = current_stop, "기존 손절선 유지"
+  return stop, basis
+
+
 def build_partial_fill_note(target_volume, filled_volume):
   """부분 체결 시 알림 메시지에 덧붙일 안내 문구 (완전 체결이면 빈 문자열)"""
   if filled_volume >= target_volume * (1 - FILL_TOLERANCE):
@@ -1332,6 +1350,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
   confirmed_close = confirmed_row["close"]
   confirmed_open = confirmed_row["open"]
   confirmed_low = confirmed_row["low"]
+  confirmed_candle_date = confirmed_row.name.strftime("%Y-%m-%d")
 
   # 1. 활성 기준봉이 없는 경우: 신규 기준봉 탐색
   if not state["active_ref_date"]:
@@ -1528,7 +1547,10 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
         rebound_cond = (
             (confirmed_close > confirmed_open) if REQUIRE_BULLISH_REBOUND else True
         )
-        is_pullback = price_cond and rebound_cond
+        # 확정봉이 기준봉 자신이면(기준일 다음 날) 저가<=중심가·양봉 조건이 항상 성립하므로,
+        # 기준봉 '이후'에 마감한 봉만 눌림목 후보로 인정한다 (기준일 당일 자기 일치 차단)
+        after_ref_cond = confirmed_candle_date > state["active_ref_date"]
+        is_pullback = price_cond and rebound_cond and after_ref_cond
 
       # 눌림목 조건은 마감 확정일봉 기준이라 하루 종일 값이 고정된다.
       # 가드가 없으면 5분 주기마다 재평가되어 같은 날 3회차까지 연속 체결되므로,
@@ -1538,12 +1560,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
       is_breakout = False
       if ENABLE_BREAKOUT_ENTRY:
         # 마감 확정일봉(09:00 마감) 종가가 기준봉 고가를 완벽히 상향 돌파하며 마감 시 매수 (장중 윗꼬리 휩소 차단)
-        is_breakout = confirmed_close > ref_high
+        # + 현재가도 고가 위에 있어야 함: 어제 돌파했어도 오늘 갭하락으로 반납했으면 이미 실패한 돌파이며,
+        #   진입가가 새 손절선 아래에 놓여 매수 직후 손절되는 경로를 차단
+        is_breakout = confirmed_close > ref_high and curr_close > ref_high
 
       # A. 신규 진입 (포지션 미보유 상태)
       if not state["entry_bought"]:
         if is_breakout:
-          # 1) 돌파 매매: 3분할이 아닌 100만원 전액 즉시 매수 + 손절가를 기준봉 고가(ref_high)로 재조정
+          # 1) 돌파 매매: 3분할이 아닌 100만원 전액 즉시 매수 + 손절가를 직전 확정봉 저가(상한 적용)로 상향 재조정
           fill = execute_buy(upbit_client, ticker, ORDER_AMOUNT_KRW, curr_close)
           if fill["ok"]:
             state["entry_bought"] = True
@@ -1553,13 +1577,16 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
             state["entry_date"] = curr_candle_date  # 2차 파동 기점 (기간 대칭 기준일)
             prev_low = state["effective_ref_low"]
-            state["effective_ref_low"] = ref_high  # 손절선을 돌파가(고가)로 상향 재조정
+            new_stop, stop_basis = calc_breakout_stop(
+                confirmed_low, fill["price"], prev_low
+            )
+            state["effective_ref_low"] = new_stop
 
             signals.append({
                 "Ticker": ticker,
                 "Event": "BUY (BREAKOUT ALL-IN)",
                 "Entry_Price": round(fill["price"], 2),
-                "Stop_Loss_Adjusted": ref_high,
+                "Stop_Loss_Adjusted": new_stop,
             })
 
             SendMessage(
@@ -1567,7 +1594,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
                 f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (100% 전액 매수)\n"
-                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(ref_high)}</b> (돌파가로 상향)\n"
+                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
 
@@ -1647,13 +1674,17 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             state["total_volume"] += add_volume
             state["scale_in_count"] = target_scale_in_steps
             prev_low = state["effective_ref_low"]
-            state["effective_ref_low"] = ref_high  # 손절선을 돌파가(고가)로 상향 재조정
+            # 손실 상한은 잔액 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
+            new_stop, stop_basis = calc_breakout_stop(
+                confirmed_low, state["entry_price"], prev_low
+            )
+            state["effective_ref_low"] = new_stop
 
             signals.append({
                 "Ticker": ticker,
                 "Event": "BUY (BREAKOUT FULL SCALE-IN)",
                 "Entry_Price": round(state["entry_price"], 2),
-                "Stop_Loss_Adjusted": ref_high,
+                "Stop_Loss_Adjusted": new_stop,
             })
 
             SendMessage(
@@ -1661,7 +1692,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
                 f"• <b>매수 잔액</b>: {fill['amount']:,.0f}원 (남은 금액 집행 ➔ 3/{target_scale_in_steps}차 완료)\n"
-                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(ref_high)}</b> (돌파가로 상향)\n"
+                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
 
