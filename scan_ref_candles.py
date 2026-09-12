@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import pandas as pd
 import requests
 from telegram_alert import SendMessage
+from state_lock import StateFileLock
 
 # 프로젝트 경로의 .env 명시적 로드
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
@@ -26,6 +27,7 @@ REF_VOL_MA_PERIOD = 20      # 거래량 평균 비교 기간 (20일)
 REF_VOL_MULTIPLIER = 2.0    # 거래량 급증 배수 (200% 이상)
 REF_MIN_CHANGE_PCT = 0.10   # 기준봉 최소 상승률 (10% 이상 장대양봉)
 PULLBACK_RATIO = 0.5        # 눌림목 기준 비율 (0.5 = 중심가)
+REF_EXPIRY_DAYS = 20        # 기준봉 유효기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 만료<->재등록 순환 발생)
 MAX_TARGET_COUNT = 20       # 스캔 대상 최대 코인 수
 API_DELAY_SEC = 0.1         # API 요청 간격
 
@@ -254,6 +256,27 @@ def detect_reference_candles(df):
 
 
 def scan_all_reference_candles():
+    """상태 파일 락을 잡은 뒤 기준봉 스캔 본체를 실행 (락 획득 실패 시 이번 스캔 건너뜀)
+
+    09:05 봇 실행이 아직 끝나지 않은 채 09:07 스캔이 시작되면 봇이 기록한 체결 상태를
+    스캐너의 오래된 사본이 덮어써 유실되므로, 봇 실행이 끝날 때까지 대기한 뒤 진행한다.
+    """
+    lock = StateFileLock(STATE_FILE, timeout_sec=180)
+    if not lock.acquire():
+        msg = (
+            f"[경고] 상태 파일 락 획득 실패({lock.lock_path}) -> 09:07 기준봉 스캔 건너뜀."
+            " 봇 실행이 장시간 겹치고 있는지 확인 필요"
+        )
+        print(msg)
+        SendMessage(f"<b>⚠️ [BST 스캐너] {msg}</b>")
+        return
+    try:
+        _scan_all_reference_candles_locked()
+    finally:
+        lock.release()
+
+
+def _scan_all_reference_candles_locked():
     """매일 09:07 KST 실행: 업비트 종목별 기준봉 탐색 후 bot_state.json 갱신 및 텔레그램 일괄 발송"""
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 80)
@@ -287,7 +310,14 @@ def scan_all_reference_candles():
                 continue
 
             df = detect_reference_candles(df)
-            ref_indices = df.index[df["Is_Ref_Candle"]].tolist()
+            # 마감 확정봉만 탐지(진행 중 마지막 봉 제외) + 유효기간(REF_EXPIRY_DAYS) 내 기준봉만 후보로 인정
+            closed_df = df.iloc[:-1]
+            latest_date = df.index[-1]
+            ref_indices = [
+                idx
+                for idx in closed_df.index[closed_df["Is_Ref_Candle"]].tolist()
+                if (latest_date - idx).days < REF_EXPIRY_DAYS
+            ]
 
             if ticker not in global_state:
                 global_state[ticker] = {
@@ -392,7 +422,17 @@ def scan_all_reference_candles():
                 ref_high = state.get("ref_high", 0.0)
 
                 if active_ref_date and effective_ref_low > 0:
-                    if curr_close >= effective_ref_low:
+                    # 봇과 동일한 만료 기준. 스캐너가 해제하지 않으면 봇이 만료시킨 기준봉을
+                    # 매일 09:07 재등록 -> 봇이 다시 만료시키는 순환이 생기므로 여기서도 해제한다.
+                    ref_age_days = (df.index[-1] - pd.Timestamp(active_ref_date)).days
+                    if ref_age_days >= REF_EXPIRY_DAYS:
+                        if not state["entry_bought"]:
+                            print(
+                                f"  [기준봉 만료] {ticker} -> 기준일: {active_ref_date} ({ref_age_days}일 경과"
+                                f" >= {REF_EXPIRY_DAYS}일) 감시 해제"
+                            )
+                            state["active_ref_date"] = None
+                    elif curr_close >= effective_ref_low:
                         print(
                             f"  [기존 감시 유지] {ticker} -> 기준일: {active_ref_date} | 현재가: {format_price(curr_close)} |"
                             f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"

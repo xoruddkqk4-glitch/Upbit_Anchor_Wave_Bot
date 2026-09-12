@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import jwt
 import numpy as np
 import pandas as pd
+from state_lock import StateFileLock
 import requests
 from telegram_alert import SendMessage
 
@@ -83,6 +84,7 @@ REF_VOL_MULTIPLIER = 2.0  # 거래량 급증 배수 (2.0 = 200% 이상)[cite: 3]
 REF_MIN_CHANGE_PCT = (
     0.10  # 기준봉 최소 상승률 (0.10 = 10% 이상 장대양봉)[cite: 3]
 )
+REF_EXPIRY_DAYS = 20  # 기준봉 유효기간(일). 20일 고가 돌파로 정의된 봉이 자기 룩백 창 밖으로 밀리는 시점. 보유 수량 없으면 감시 해제 (scan_ref_candles.py와 동일 값 유지)
 
 # 매수(진입) 전략 파라미터
 ENABLE_PULLBACK_ENTRY = True  # 눌림목 매수 전략 활성화 (중심가 이하 진입)[cite: 3]
@@ -113,6 +115,7 @@ BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 진입 손절선 상한: 직전 확정봉
 # 주문 금액 및 시스템 설정 (종목당 최대 매수 금액 설정)
 MAX_BUY_AMOUNT_KRW = 1000000  # 종목당 최대 매수 실행 금액 (원 단위: 기본 100만원 = 1,000,000원)
 ORDER_AMOUNT_KRW = MAX_BUY_AMOUNT_KRW  # 종목당 총 매수 실행 금액
+MAX_OPEN_POSITIONS = 5  # 동시 보유 종목 수 상한 (신규 진입·재매수에만 적용, 분할 추가 매수는 기존 포지션이라 제외). 최대 노출 = 상한 × ORDER_AMOUNT_KRW
 API_DELAY_SEC = 0.1  # API 요청 간격 (초)
 
 # 상태 저장용 JSON 파일 경로
@@ -992,6 +995,32 @@ class UpbitClient:
     res = requests.get(url, headers=self._get_headers(), timeout=5).json()
     return res if isinstance(res, list) else []
 
+  def get_krw_balance(self):
+    """주문 가능 KRW 잔고(locked 제외). 조회 실패 시 None (호출부는 주문 API 거절 알림에 맡김)"""
+    try:
+      for b in self.get_balances():
+        if b.get("currency") == "KRW":
+          return float(b.get("balance", 0.0) or 0.0)
+      return 0.0
+    except Exception as e:
+      print(f"[경고] KRW 잔고 조회 실패: {e}")
+      return None
+
+  @staticmethod
+  def _alert_order_rejected(ticker, side, res):
+    """주문 API가 uuid 없이 응답(거절)한 경우 사유를 콘솔·텔레그램으로 알림 (기존에는 조용히 미체결 처리)"""
+    err = res.get("error", {}) if isinstance(res, dict) else {}
+    err = err if isinstance(err, dict) else {}
+    name = err.get("name", "unknown")
+    message = err.get("message", str(res)[:200])
+    side_label = "매수" if side == "bid" else "매도"
+    print(f"[주문 거절] {ticker} {side_label} -> {name}: {message}")
+    SendMessage(
+        f"<b>🚫 [BST 봇] {side_label} 주문 거절</b>\n"
+        f"• <b>종목</b>: {ticker}\n"
+        f"• <b>사유</b>: {name} - {message}"
+    )
+
   def get_current_prices(self, markets):
     """복수 마켓 현재가 일괄 조회 -> {market: trade_price}"""
     markets = [m for m in markets if m]
@@ -1150,6 +1179,7 @@ class UpbitClient:
     )
 
     if not order_uuid:
+      self._alert_order_rejected(ticker, params["side"], res)
       return self._summarize_fill(None, limit_price)
 
     if wait_sec > 0:
@@ -1204,6 +1234,7 @@ class UpbitClient:
     )
 
     if not order_uuid:
+      self._alert_order_rejected(ticker, params["side"], res)
       return self._summarize_fill(None, limit_price)
 
     if wait_sec > 0:
@@ -1220,6 +1251,10 @@ class UpbitClient:
     return self._summarize_fill(order_uuid, limit_price)
 
 
+# 한 실행(5분 주기) 안에서 여러 종목이 잔고 부족에 동시에 걸려도 텔레그램 알림은 1회만 (크론 실행마다 초기화)
+_balance_alert_sent_this_run = False
+
+
 def execute_buy(upbit_client, ticker, amount_krw, fallback_price):
   """매수 집행 후 실제 체결 결과 반환 (모의/스캔 모드면 이론 체결값)
 
@@ -1232,6 +1267,18 @@ def execute_buy(upbit_client, ticker, amount_krw, fallback_price):
         "volume": amount_krw / fallback_price,
         "amount": amount_krw,
     }
+
+  # 주문 전 KRW 잔고 확인: 부족하면 주문을 내지 않고 알림 (거절 응답을 5분마다 반복 유발하는 대신 사전 차단).
+  # 상태는 바꾸지 않으므로 잔고가 채워지면 다음 주기에 정상 진입한다.
+  krw = upbit_client.get_krw_balance()
+  if krw is not None and krw < amount_krw:
+    global _balance_alert_sent_this_run
+    msg = f"{ticker} 매수 금액 {amount_krw:,.0f}원 > 주문 가능 KRW {krw:,.0f}원 -> 주문 생략"
+    print(f"[잔고 부족] {msg}")
+    if not _balance_alert_sent_this_run:
+      SendMessage(f"<b>💸 [BST 봇] 잔고 부족으로 매수 생략</b>\n• {msg}")
+      _balance_alert_sent_this_run = True
+    return {"ok": False, "price": fallback_price, "volume": 0.0, "amount": 0.0}
 
   fill = upbit_client.buy_limit_with_slippage_protection(
       ticker=ticker, amount_krw=amount_krw
@@ -1311,6 +1358,38 @@ def detect_reference_candles(df):
   return df
 
 
+def new_ticker_state():
+  """종목별 초기 상태. 신규 등록·손절 초기화·기준봉 만료 세 곳에서 동일하게 사용 (키 누락 방지)"""
+  return {
+      "active_ref_date": None,
+      "entry_bought": False,
+      "entry_date": None,
+      "entry_price": 0.0,
+      "total_volume": 0.0,
+      "remaining_ratio": 1.0,
+      "symmetry_tp_executed": False,
+      "scale_in_count": 0,
+      "last_scale_in_date": None,
+      "base_price": None,
+      "wave_anchor_price": None,
+      "wave_anchor_date": None,
+      "ref_high": 0.0,
+      "effective_ref_low": 0.0,
+      "ref_mid": 0.0,
+      "rise_duration": 0,
+      "wave_height": 0.0,
+  }
+
+
+def count_open_positions(global_state):
+  """실제 보유 수량이 있는 종목 수 (동시 보유 상한 판정용)"""
+  return sum(
+      1
+      for st in global_state.values()
+      if st.get("entry_bought", False) and st.get("remaining_ratio", 0) > 0
+  )
+
+
 def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=True):
   """개선된 BST 전략을 반영한 단일 종목 실시간 모니터링 및 매매 집행
 
@@ -1320,23 +1399,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
   df = detect_reference_candles(df)
 
   if ticker not in global_state:
-    global_state[ticker] = {
-        "active_ref_date": None,
-        "entry_bought": False,
-        "entry_date": None,
-        "entry_price": 0.0,
-        "total_volume": 0.0,
-        "remaining_ratio": 1.0,
-        "symmetry_tp_executed": False,
-        "scale_in_count": 0,
-        "last_scale_in_date": None,
-        "base_price": None,
-        "ref_high": 0.0,
-        "effective_ref_low": 0.0,
-        "ref_mid": 0.0,
-        "rise_duration": 0,
-        "wave_height": 0.0,
-    }
+    global_state[ticker] = new_ticker_state()
 
   state = global_state[ticker]
   signals = []
@@ -1358,7 +1421,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
   # 1. 활성 기준봉이 없는 경우: 신규 기준봉 탐색
   if not state["active_ref_date"]:
-    ref_indices = df.index[df["Is_Ref_Candle"]].tolist()
+    # 마감 확정봉만 탐지(진행 중 마지막 봉 제외: 장중 값이 스냅샷으로 굳는 문제 차단)
+    # + 유효기간(REF_EXPIRY_DAYS) 내 기준봉만 후보로 인정 (등록 즉시 만료되는 순환 방지)
+    closed_df = df.iloc[:-1]
+    ref_indices = [
+        idx
+        for idx in closed_df.index[closed_df["Is_Ref_Candle"]].tolist()
+        if (curr_row.name - idx).days < REF_EXPIRY_DAYS
+    ]
     if ref_indices:
       latest_ref_idx = ref_indices[-1]
       ref_row = df.loc[latest_ref_idx]
@@ -1398,6 +1468,26 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
     ref_high = state["ref_high"]
     wave_height = state["wave_height"]
     rise_duration = state["rise_duration"]
+
+    # [기준봉 만료] 보유 수량이 없는 상태(미진입 또는 전량 청산 후 재매수 대기)로 REF_EXPIRY_DAYS 경과 시 감시 해제.
+    # 손절 외에는 해제 경로가 없어 오래된 기준봉이 무기한 남고, 무관한 국면의 봉이 우연히 눌림목 조건을 만족해 진입하던 문제 차단.
+    is_holding = state["entry_bought"] and state["remaining_ratio"] > 0
+    ref_age_days = (
+        pd.Timestamp(curr_candle_date) - pd.Timestamp(state["active_ref_date"])
+    ).days
+    if not is_holding and ref_age_days >= REF_EXPIRY_DAYS:
+      print(
+          f"[{ticker}] [기준봉 만료] 기준일 {state['active_ref_date']} ({ref_age_days}일 경과"
+          f" >= {REF_EXPIRY_DAYS}일), 보유 없음 -> 감시 해제 및 상태 초기화"
+      )
+      SendMessage(
+          f"<b>⏳ [BST 봇] 기준봉 만료 (감시 해제)</b>\n"
+          f"• <b>종목</b>: {ticker}\n"
+          f"• <b>기준일</b>: {state['active_ref_date']} ({ref_age_days}일 경과 / 유효 {REF_EXPIRY_DAYS}일)\n"
+          f"• <b>사유</b>: 유효기간 내 진입(또는 재매수) 없음 -> 기준봉 및 재매수 기준가 초기화"
+      )
+      global_state[ticker] = new_ticker_state()
+      return signals
 
     # [손절 체크] 기준봉 저가(마진노선) 이탈 시 데이터 초기화
     if curr_close < effective_ref_low:
@@ -1458,30 +1548,18 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           )
           return signals
 
-      global_state[ticker] = {
-          "active_ref_date": None,
-          "entry_bought": False,
-          "entry_date": None,
-          "entry_price": 0.0,
-          "total_volume": 0.0,
-          "remaining_ratio": 1.0,
-          "symmetry_tp_executed": False,
-          "scale_in_count": 0,
-          "last_scale_in_date": None,
-          "base_price": None,
-          "ref_high": 0.0,
-          "effective_ref_low": 0.0,
-          "ref_mid": 0.0,
-          "rise_duration": 0,
-          "wave_height": 0.0,
-      }
+      global_state[ticker] = new_ticker_state()
       return signals
 
     target_scale_in_steps = 3 if ENABLE_SCALE_IN_BUY else 1
+    # 동시 보유 상한: 실제 보유 수량이 있는 종목 수 기준. 현재 종목은 신규 진입/재매수 경로에서는 미보유이므로 중복 계산 없음
+    open_positions = count_open_positions(global_state)
+    can_open_new = open_positions < MAX_OPEN_POSITIONS
 
     # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 >= prev_ma5) 동시 확인 시 재매수
     if (
         allow_entry
+        and can_open_new
         and state["base_price"] is not None
         and curr_close > state["base_price"]
         and curr_ma5 >= prev_ma5
@@ -1496,8 +1574,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         state["entry_price"] = entry_price
         state["total_volume"] = total_volume
         state["remaining_ratio"] = 1.0
-        state["symmetry_tp_executed"] = False
-        state["entry_date"] = curr_candle_date  # 2차 파동 기점 (기간 대칭 기준일)
+        state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
+        # 파동 기준점(wave_anchor_*)과 대칭 익절 플래그(symmetry_tp_executed)는 '파동' 단위 상태라 재매수로 갱신하지 않는다.
+        # 재매수는 항상 이전 매도가보다 높게 되사므로, 기준점을 진입가로 옮기면 대칭 목표가 매번 위로 도망가
+        # 원래 파동의 목표에 결코 도달하지 못한다. 구버전 상태(기준점 미기록)만 현재 진입값으로 백필.
+        if not state.get("wave_anchor_price"):
+          state["wave_anchor_price"] = entry_price
+          state["wave_anchor_date"] = curr_candle_date
         # 최대 금액 전액 재매수이므로 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
         # (이전 사이클이 1/3만 진입한 채 5일선에 팔린 경우, 재매수 후 눌림목 조건에 걸리면
         #  2/3가 더 들어가 133만원이 되는 과매수 경로 차단). 이후는 매도 로직만 동작.
@@ -1572,8 +1655,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         #   진입가가 새 손절선 아래에 놓여 매수 직후 손절되는 경로를 차단
         is_breakout = confirmed_close > ref_high and curr_close > ref_high
 
-      # A. 신규 진입 (포지션 미보유 상태)
-      if not state["entry_bought"]:
+      # A. 신규 진입 (포지션 미보유 상태) - 동시 보유 상한 도달 시 신규 진입 생략
+      if not state["entry_bought"] and not can_open_new and (is_breakout or is_pullback):
+        print(
+            f"[{ticker}] [보유 상한] 진입 신호 있으나 동시 보유 {open_positions}/{MAX_OPEN_POSITIONS}"
+            " 도달 -> 신규 진입 생략"
+        )
+      if not state["entry_bought"] and can_open_new:
         if is_breakout:
           # 1) 돌파 매매: 3분할이 아닌 100만원 전액 즉시 매수 + 손절가를 직전 확정봉 저가(상한 적용)로 상향 재조정
           fill = execute_buy(upbit_client, ticker, ORDER_AMOUNT_KRW, curr_close)
@@ -1583,7 +1671,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["total_volume"] = fill["volume"]
             state["remaining_ratio"] = 1.0
             state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
-            state["entry_date"] = curr_candle_date  # 2차 파동 기점 (기간 대칭 기준일)
+            state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
+            state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
+            state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
             prev_low = state["effective_ref_low"]
             new_stop, stop_basis = calc_breakout_stop(
                 confirmed_low, fill["price"], prev_low
@@ -1628,7 +1718,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["remaining_ratio"] = 1.0
             state["scale_in_count"] = 1
             state["last_scale_in_date"] = curr_candle_date  # 1일 1회 분할 매수 제한
-            state["entry_date"] = curr_candle_date  # 2차 파동 기점 (기간 대칭 기준일, 추가 매수 시 유지)
+            state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용, 추가 매수 시 유지)
+            state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
+            state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 추가 매수·재매수 시 유지
 
             signals.append({
                 "Ticker": ticker,
@@ -1773,16 +1865,21 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       if not state.get("entry_date"):
         # 구버전 상태 파일 호환: 진입일 미기록 포지션은 현재 일봉부터 기간 카운트 시작
         state["entry_date"] = curr_candle_date
-      days_since_entry = (
-          pd.Timestamp(curr_candle_date) - pd.Timestamp(state["entry_date"])
+      if not state.get("wave_anchor_price"):
+        # 구버전 상태 파일 호환: 파동 기준점 미기록 포지션은 현재 진입값을 기준점으로 사용
+        state["wave_anchor_price"] = entry_price
+        state["wave_anchor_date"] = state["entry_date"]
+      # 대칭 목표는 포지션 진입가가 아닌 '파동 기준점'(최초 진입) 기준. 재매수로 진입가가 갱신돼도 목표는 고정
+      days_since_anchor = (
+          pd.Timestamp(curr_candle_date) - pd.Timestamp(state["wave_anchor_date"])
       ).days
-      # 허용오차만큼 앞당겨 발동 가능하되, 진입 당일(0일) 발동은 배제
+      # 허용오차만큼 앞당겨 발동 가능하되, 기준일 당일(0일) 발동은 배제
       time_target_days = max(rise_duration - TIME_SYMMETRY_TOLERANCE_DAYS, 1)
-      price_target = entry_price + wave_height
+      price_target = state["wave_anchor_price"] + wave_height
 
       is_time_symmetric_exit = (
           USE_TIME_SYMMETRY_EXIT
-          and days_since_entry >= time_target_days
+          and days_since_anchor >= time_target_days
           and current_return >= MIN_TAKE_PROFIT_PCT
       )
       is_price_symmetric_exit = (
@@ -1797,8 +1894,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         )
       elif is_time_symmetric_exit:
         symmetry_reason = (
-            f"기간 대칭 달성: 1차 파동 {rise_duration}일 대비 진입 후"
-            f" {days_since_entry}일 경과 (허용오차 ±{TIME_SYMMETRY_TOLERANCE_DAYS}일)"
+            f"기간 대칭 달성: 1차 파동 {rise_duration}일 대비 파동 기점 후"
+            f" {days_since_anchor}일 경과 (허용오차 ±{TIME_SYMMETRY_TOLERANCE_DAYS}일)"
         )
       else:
         symmetry_reason = ""
@@ -1840,7 +1937,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f"• <b>수익률</b>: <b>{realized_return * 100:+.2f}%</b>\n"
               f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b>\n"
               f"• <b>사유</b>: {symmetry_reason} (보유 수량 50% 익절)\n"
-              f"• <b>대칭 목표</b>: 가격 {format_price(price_target)} / 기간 {rise_duration}일 (진입 후 {days_since_entry}일 경과)"
+              f"• <b>대칭 목표</b>: 가격 {format_price(price_target)} / 기간 {rise_duration}일 (파동 기점 {state['wave_anchor_date']} 후 {days_since_anchor}일 경과)"
               f"{fill_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
@@ -1973,6 +2070,27 @@ def select_monitor_tickers(global_state, combined_exclude):
 
 
 def run_market_scan():
+  """상태 파일 락을 잡은 뒤 5분 주기 모니터링 본체를 실행 (락 획득 실패 시 이번 주기 건너뜀)
+
+  09:07 스캐너(scan_ref_candles.py)나 지연된 이전 봇 실행과 겹치면 load->save 사이의
+  변경이 서로 덮여 유실되므로(유령 포지션), 무락 진행 대신 한 주기를 건너뛰는 쪽을 택한다.
+  """
+  lock = StateFileLock(STATE_FILE, timeout_sec=120)
+  if not lock.acquire():
+    msg = (
+        f"[경고] 상태 파일 락 획득 실패({lock.lock_path}) -> 이번 5분 주기 모니터링 건너뜀."
+        " 다른 봇/스캐너 실행이 장시간 겹치고 있는지 확인 필요"
+    )
+    print(msg)
+    SendMessage(f"<b>⚠️ [BST 봇] {msg}</b>")
+    return
+  try:
+    _run_market_scan_locked()
+  finally:
+    lock.release()
+
+
+def _run_market_scan_locked():
   """5분마다 실행되어 09:07 스캐너(scan_ref_candles.py)가 공유한 활성 기준봉 종목만 실시간 점검"""
   global_state = load_state()
   client = UpbitClient(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)
