@@ -23,6 +23,15 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "").strip()
 UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "").strip()
 
+# Google Sheets 연동 설정 (.env 파일 우선 적용)
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "service_account.json").strip()
+GOOGLE_SPREADSHEET_TITLE = os.getenv("GOOGLE_SPREADSHEET_TITLE", "hybrid_turtle_trade_history").strip()
+GOOGLE_SPREADSHEET_ID = (
+    os.getenv("GOOGLE_SPREADSHEET_ID", "").strip()
+    or os.getenv("SPREADSHEET_ID", "").strip()
+)
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+
 # 매매 및 실행 모드 설정 (.env의 UPBIT_PAPER_TRADING=False 인 경우 실주문 모드 전환, 기본값 False=스캔/모의 모드)
 AUTO_TRADE_EXECUTE = os.getenv("AUTO_TRADE_EXECUTE", "False").lower() in [
     "true",
@@ -166,7 +175,660 @@ def save_state(state):
     print(f"[오류] 상태 파일 저장 실패: {e}")
 
 
-def save_trade_to_excel(
+def get_google_sheet_doc():
+  """구글 서비스 계정 인증 후 스프레드시트 개체 반환 (실패 시 None)"""
+  try:
+    import gspread
+
+    json_path = GOOGLE_SERVICE_ACCOUNT_JSON
+    if not os.path.isabs(json_path):
+      json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), json_path)
+
+    if not os.path.exists(json_path):
+      return None
+
+    gc = gspread.service_account(filename=json_path)
+
+    doc = None
+    if GOOGLE_SPREADSHEET_ID:
+      try:
+        doc = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
+      except Exception:
+        pass
+
+    if doc is None and GOOGLE_SPREADSHEET_TITLE:
+      try:
+        doc = gc.open(GOOGLE_SPREADSHEET_TITLE)
+      except Exception:
+        pass
+
+    if doc is None and GOOGLE_DRIVE_FOLDER_ID:
+      try:
+        doc = gc.open_by_key(GOOGLE_DRIVE_FOLDER_ID)
+      except Exception:
+        pass
+
+    if doc is None and GOOGLE_SPREADSHEET_TITLE:
+      try:
+        if GOOGLE_DRIVE_FOLDER_ID:
+          doc = gc.create(GOOGLE_SPREADSHEET_TITLE, folder_id=GOOGLE_DRIVE_FOLDER_ID)
+        else:
+          doc = gc.create(GOOGLE_SPREADSHEET_TITLE)
+      except Exception:
+        return None
+
+    return doc
+  except Exception:
+    return None
+
+
+def ensure_sheet_headers(ws, expected_headers):
+  """시트 1행에 올바른 열이름(헤더) 제목이 위치하도록 교정 (데이터 행이 1행에 위치한 경우 헤더 삽입 후 데이터 밀어내기)"""
+  try:
+    all_rows = ws.get_all_values()
+    if not all_rows:
+      ws.append_row(expected_headers, value_input_option="USER_ENTERED")
+    else:
+      first_row = all_rows[0]
+      if first_row != expected_headers:
+        if first_row and (first_row[0].startswith("202") or first_row[0] != expected_headers[0]):
+          ws.insert_row(expected_headers, index=1, value_input_option="USER_ENTERED")
+        else:
+          col_end = chr(64 + len(expected_headers))
+          ws.update(range_name=f"A1:{col_end}1", values=[expected_headers], value_input_option="USER_ENTERED")
+  except Exception as e:
+    print(f"[경고] 시트 헤더 교정 중 오류: {e}")
+
+
+def format_sheet_headers(doc, ws, num_cols=10):
+  """각 시트의 1행 열이름(헤더)에 스타일 적용 (진한 남색 배경, 흰색 굵은 글씨, 1행 고정) 및 2행 데이터행 서식 정상화"""
+  try:
+    sheet_id = ws.id
+    requests = [
+        # 1행 헤더 스타일 적용 (진한 남색 배경, 흰색 굵은 글씨)
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": num_cols,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {
+                            "red": 0.12,
+                            "green": 0.28,
+                            "blue": 0.49,
+                        },
+                        "textFormat": {
+                            "foregroundColor": {
+                                "red": 1.0,
+                                "green": 1.0,
+                                "blue": 1.0,
+                            },
+                            "bold": True,
+                        },
+                        "horizontalAlignment": "CENTER",
+                    }
+                },
+                "fields": (
+                    "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"
+                ),
+            }
+        },
+        # 2행 이하 데이터행 스타일 보정 (흰색 배경, 검정 일반 글씨)
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 1000,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": num_cols,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {
+                            "red": 1.0,
+                            "green": 1.0,
+                            "blue": 1.0,
+                        },
+                        "textFormat": {
+                            "foregroundColor": {
+                                "red": 0.0,
+                                "green": 0.0,
+                                "blue": 0.0,
+                            },
+                            "bold": False,
+                        },
+                    }
+                },
+                "fields": (
+                    "userEnteredFormat(backgroundColor,textFormat)"
+                ),
+            }
+        },
+        {
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sheet_id,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+    ]
+    doc.batch_update({"requests": requests})
+  except Exception:
+    pass
+
+
+def setup_pnl_chart_filter_ui(doc, ws_chart):
+  """'손익차트' 시트에 대시보드 UI (KPI 카드 + 단일 기간 선택 드롭다운 + 동적 날짜 활성화 제어 + 차트 연동) 생성"""
+  try:
+    chart_sheet_id = ws_chart.id
+
+    # 1. 시트 데이터 및 영역 초기화 후 Grid 크기 확장 (1000행 30열 확보)
+    ws_chart.clear()
+    try:
+      ws_chart.resize(rows=1000, cols=30)
+    except Exception:
+      pass
+
+    # 2. UI 구조 레이아웃 작성 (1~4행)
+    ws_chart.update(
+        range_name="A1:J4",
+        values=[
+            ["📊 실현 손익 추이 대시보드", "", "", "", "", "", "", "", "", ""],
+            [
+                "",
+                "⚡ 기간 선택:",
+                "전체",
+                "",
+                "📅 시작일:",
+                '=IF(C2="수동 날짜 입력", "2026-09-03", "- 비활성화 -")',
+                "",
+                "📅 종료일:",
+                '=IF(C2="수동 날짜 입력", "2026-09-12", "- 비활성화 -")',
+                "",
+            ],
+            [
+                "",
+                "총 누적 실현손익",
+                "",
+                "전체 누적 수익률",
+                "",
+                "",
+                "조회 기간 손익",
+                "",
+                "",
+                "조회 기간 수익률",
+            ],
+            [
+                "",
+                '=IFERROR(TEXT(INDEX(FILTER(\'날짜별 포트폴리오 추이\'!F2:F, \'날짜별 포트폴리오 추이\'!A2:A<>""), COUNTA(FILTER(\'날짜별 포트폴리오 추이\'!A2:A, \'날짜별 포트폴리오 추이\'!A2:A<>""))), "#,##0원"), "0원")',
+                "",
+                '=IFERROR(TEXT(INDEX(FILTER(\'날짜별 포트폴리오 추이\'!G2:G, \'날짜별 포트폴리오 추이\'!A2:A<>""), COUNTA(FILTER(\'날짜별 포트폴리오 추이\'!A2:A, \'날짜별 포트폴리오 추이\'!A2:A<>""))), "+0.00%;-0.00%"), "0.00%")',
+                "",
+                "",
+                '=IFERROR(TEXT(SUM(S2:S1000), "#,##0원"), "0원")',
+                "",
+                "",
+                '=IFERROR(TEXT(SUM(S2:S1000)/10000000, "+0.00%;-0.00%"), "0.00%")',
+            ],
+        ],
+        value_input_option="USER_ENTERED",
+    )
+
+    # 3. Hidden 헬퍼 영역 (P1:T1000) 구성 - 노출 UI 영역 외부 배치
+    # P1: 시작일 헬퍼, P2: 종료일 헬퍼
+    ws_chart.update(
+        range_name="P1:P2",
+        values=[[
+            '=IF(C2="수동 날짜 입력", IF(ISDATE(F2), F2, DATE(2020,1,1)), IF(C2="최근 7일", TODAY()-7, IF(C2="최근 30일", TODAY()-30, IF(C2="최근 90일", TODAY()-90, IF(C2="최근 180일", TODAY()-180, IF(C2="올해(YTD)", DATE(YEAR(TODAY()),1,1), DATE(2020,1,1)))))))',
+        ], [
+            '=IF(C2="수동 날짜 입력", IF(ISDATE(I2), I2, DATE(2099,12,31)), DATE(2099,12,31))',
+        ]],
+        value_input_option="USER_ENTERED",
+    )
+
+    # R1:T1 (차트 헤더) 및 R2 (TO_TEXT 적용 필터링 수식)
+    ws_chart.update(
+        range_name="R1:T1",
+        values=[["기간", "일일 실현손익(원)", "누적 실현손익(원)"]],
+        value_input_option="USER_ENTERED",
+    )
+
+    filter_formula = (
+        "=IFERROR(FILTER({TO_TEXT('날짜별 포트폴리오 추이'!A2:A), '날짜별 포트폴리오"
+        " 추이'!E2:F}, '날짜별 포트폴리오 추이'!A2:A <> \"\", DATEVALUE('날짜별"
+        " 포트폴리오 추이'!A2:A) >= P1, DATEVALUE('날짜별 포트폴리오 추이'!A2:A)"
+        " <= P2), '날짜별 포트폴리오 추이'!A2:C)"
+    )
+    ws_chart.update(range_name="R2", values=[[filter_formula]], value_input_option="USER_ENTERED")
+
+    # 4. 서식 및 셀 유효성 검사 (전체 초기화 후 C2 단일 드롭다운 & F2, I2 달력 팝업 설정)
+    requests = [
+        # 전체 1~10행 영역 유효성 검사 규칙 완전히 초기화/삭제 (B2, F1 등 잔여 드롭다운 제거)
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": chart_sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 10,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 30,
+                }
+            }
+        },
+        # C2 기간 선택 단일 드롭다운 설정
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": chart_sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 2,
+                    "endColumnIndex": 3,
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [
+                            {"userEnteredValue": "전체"},
+                            {"userEnteredValue": "최근 7일"},
+                            {"userEnteredValue": "최근 30일"},
+                            {"userEnteredValue": "최근 90일"},
+                            {"userEnteredValue": "최근 180일"},
+                            {"userEnteredValue": "올해(YTD)"},
+                            {"userEnteredValue": "수동 날짜 입력"},
+                        ],
+                    },
+                    "showCustomUi": True,
+                    "strict": True,
+                },
+            }
+        },
+        # F2 시작일 달력 유효성 검사
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": chart_sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 5,
+                    "endColumnIndex": 6,
+                },
+                "rule": {
+                    "condition": {"type": "DATE_IS_VALID"},
+                    "showCustomUi": True,
+                    "strict": False,
+                },
+            }
+        },
+        # I2 종료일 달력 유효성 검사
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": chart_sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 8,
+                    "endColumnIndex": 9,
+                },
+                "rule": {
+                    "condition": {"type": "DATE_IS_VALID"},
+                    "showCustomUi": True,
+                    "strict": False,
+                },
+            }
+        },
+        # 1행 타이틀 스타일 (진한 남색 굵은 글씨)
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": chart_sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 10,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {
+                            "foregroundColor": {"red": 0.12, "green": 0.28, "blue": 0.49},
+                            "bold": True,
+                            "fontSize": 14,
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat(textFormat)",
+            }
+        },
+        # 2행 컨트롤 바 배경 및 서식 (연한 그레이 배경)
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": chart_sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 1,
+                    "endColumnIndex": 10,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.94, "green": 0.95, "blue": 0.97},
+                        "textFormat": {"bold": True, "foregroundColor": {"red": 0.12, "green": 0.28, "blue": 0.49}},
+                        "horizontalAlignment": "CENTER",
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+            }
+        },
+        # 3~4행 KPI 요약 카드 배경 및 글씨 스타일
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": chart_sheet_id,
+                    "startRowIndex": 2,
+                    "endRowIndex": 4,
+                    "startColumnIndex": 1,
+                    "endColumnIndex": 10,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.97, "green": 0.98, "blue": 0.99},
+                        "textFormat": {"bold": True},
+                        "horizontalAlignment": "CENTER",
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+            }
+        },
+    ]
+    doc.batch_update({"requests": requests})
+  except Exception as e:
+    print(f"[경고] 손익차트 대시보드 UI 설정 중 오류: {e}")
+
+
+def get_or_create_worksheets(doc):
+  """'체결기록', '날짜별 포트폴리오 추이', '손익차트' 3개 시트 확보 및 열이름 헤더 보정"""
+  # 1. 기존 '매매기록' 시트가 존재하면 '체결기록'으로 이름 변경
+  try:
+    legacy_ws = doc.worksheet("매매기록")
+    legacy_ws.update_title("체결기록")
+  except Exception:
+    pass
+
+  # 2. '체결기록' 시트
+  try:
+    ws_trades = doc.worksheet("체결기록")
+  except Exception:
+    try:
+      ws_trades = doc.add_worksheet(title="체결기록", rows="2000", cols="15")
+    except Exception:
+      ws_trades = doc.get_worksheet(0)
+      try:
+        ws_trades.update_title("체결기록")
+      except Exception:
+        pass
+
+  trade_headers = [
+      "일시",
+      "종목코드",
+      "구분",
+      "매매 전략",
+      "체결가(원)",
+      "체결수량",
+      "거래금액(원)",
+      "평단가(원)",
+      "실현손익(원)",
+      "수익률(%)",
+      "사유/비고",
+  ]
+  ensure_sheet_headers(ws_trades, trade_headers)
+  format_sheet_headers(doc, ws_trades, 11)
+
+  # 3. '날짜별 포트폴리오 추이' 시트
+  try:
+    ws_trend = doc.worksheet("날짜별 포트폴리오 추이")
+  except Exception:
+    ws_trend = doc.add_worksheet(title="날짜별 포트폴리오 추이", rows="1000", cols="10")
+
+  trend_headers = [
+      "날짜",
+      "원화 잔고(원)",
+      "암호화폐 평가금(원)",
+      "총 포트폴리오(원)",
+      "일일 실현손익(원)",
+      "누적 실현손익(원)",
+      "누적 수익률(%)",
+  ]
+  ensure_sheet_headers(ws_trend, trend_headers)
+  format_sheet_headers(doc, ws_trend, 7)
+
+  # 4. '손익차트' 시트
+  try:
+    ws_chart = doc.worksheet("손익차트")
+  except Exception:
+    ws_chart = doc.add_worksheet(title="손익차트", rows="1000", cols="30")
+
+  setup_pnl_chart_filter_ui(doc, ws_chart)
+
+  return ws_trades, ws_trend, ws_chart
+
+
+def ensure_pnl_combo_chart(doc, ws_trend, ws_chart):
+  """'손익차트' 시트에 실현 손익 추이 Combo 차트 자동 생성 (기존 차트 삭제 후 재생성)"""
+  try:
+    metadata = doc.fetch_sheet_metadata()
+    chart_sheet_id = ws_chart.id
+
+    # 기존에 '손익차트' 시트에 남아있는 모든 차트 삭제하여 최신 스펙/제목/범례 적용 보장
+    charts_to_delete = []
+    for sheet in metadata.get("sheets", []):
+      if sheet.get("properties", {}).get("sheetId") == chart_sheet_id:
+        for chart in sheet.get("charts", []):
+          charts_to_delete.append({"deleteEmbeddedObject": {"objectId": chart["chartId"]}})
+
+    if charts_to_delete:
+      doc.batch_update({"requests": charts_to_delete})
+
+    chart_spec = {
+        "title": "실현 손익 추이",
+        "basicChart": {
+            "chartType": "COMBO",
+            "legendPosition": "TOP_LEGEND",
+            "axis": [
+                {"position": "BOTTOM_AXIS", "title": "기간"},
+                {"position": "LEFT_AXIS", "title": "손익 (원)"},
+            ],
+            "domains": [
+                {
+                    "domain": {
+                        "sourceRange": {
+                            "sources": [
+                                {
+                                    "sheetId": chart_sheet_id,
+                                    "startRowIndex": 0,
+                                    "endRowIndex": 1000,
+                                    "startColumnIndex": 17,  # R열 (17~18)
+                                    "endColumnIndex": 18,
+                                }
+                            ]
+                        }
+                    }
+                }
+            ],
+            "series": [
+                {
+                    "series": {
+                        "sourceRange": {
+                            "sources": [
+                                {
+                                    "sheetId": chart_sheet_id,
+                                    "startRowIndex": 0,
+                                    "endRowIndex": 1000,
+                                    "startColumnIndex": 18,  # S열 (18~19)
+                                    "endColumnIndex": 19,
+                                }
+                            ]
+                        }
+                    },
+                    "targetAxis": "LEFT_AXIS",
+                    "type": "COLUMN",
+                    "colorStyle": {
+                        "rgbColor": {"red": 0.35, "green": 0.65, "blue": 0.85}
+                    },
+                },
+                {
+                    "series": {
+                        "sourceRange": {
+                            "sources": [
+                                {
+                                    "sheetId": chart_sheet_id,
+                                    "startRowIndex": 0,
+                                    "endRowIndex": 1000,
+                                    "startColumnIndex": 19,  # T열 (19~20)
+                                    "endColumnIndex": 20,
+                                }
+                            ]
+                        }
+                    },
+                    "targetAxis": "LEFT_AXIS",
+                    "type": "LINE",
+                    "colorStyle": {
+                        "rgbColor": {"red": 0.85, "green": 0.15, "blue": 0.15}
+                    },
+                },
+            ],
+            "headerCount": 1,
+        },
+    }
+
+    request_body = {
+        "requests": [
+            {
+                "addChart": {
+                    "chart": {
+                        "spec": chart_spec,
+                        "position": {
+                            "overlayPosition": {
+                                "anchorCell": {
+                                    "sheetId": chart_sheet_id,
+                                    "rowIndex": 5,
+                                    "columnIndex": 1,
+                                },
+                                "offsetXPixels": 0,
+                                "offsetYPixels": 0,
+                                "widthPixels": 980,
+                                "heightPixels": 550,
+                            }
+                        },
+                    }
+                }
+            }
+        ]
+    }
+
+    doc.batch_update(request_body)
+    print(" └ [완료] '손익차트' Combo 차트 새 생성 완료")
+  except Exception as e:
+    print(f"[경고] 구글 시트 손익차트 생성 실패: {e}")
+
+
+def update_daily_portfolio_snapshot(doc, ws_trades, ws_trend, upbit_client=None):
+  """'날짜별 포트폴리오 추이' 시트에 오늘자 잔고 및 일일/누적 손익 업데이트"""
+  try:
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    # 1. 체결기록에서 오늘 일일 실현손익 합산
+    all_trades = ws_trades.get_all_values()
+    today_daily_pnl = 0.0
+    if len(all_trades) > 1:
+      for row in all_trades[1:]:
+        if len(row) >= 9:
+          trade_time = str(row[0])
+          if trade_time.startswith(today_str):
+            try:
+              val_str = str(row[8]).replace(",", "").replace("원", "").strip()
+              if val_str:
+                today_daily_pnl += float(val_str)
+            except (ValueError, TypeError):
+              pass
+
+    # 2. 누적 실현손익 계산
+    all_trend = ws_trend.get_all_values()
+    prev_cum_pnl = 0.0
+    today_row_idx = None
+
+    if len(all_trend) > 1:
+      for idx, row in enumerate(all_trend[1:], start=2):
+        if row and str(row[0]).strip() == today_str:
+          today_row_idx = idx
+        elif row and str(row[0]).strip() < today_str:
+          try:
+            val_str = str(row[5]).replace(",", "").replace("원", "").strip()
+            if val_str:
+              prev_cum_pnl = float(val_str)
+          except (ValueError, TypeError):
+            pass
+
+    cum_pnl = prev_cum_pnl + today_daily_pnl
+
+    # 3. 업비트 계좌 잔고 조회
+    krw_balance = 0.0
+    coin_eval = 0.0
+    if upbit_client and hasattr(upbit_client, "access_key") and upbit_client.access_key:
+      try:
+        balances = upbit_client.get_balances()
+        if isinstance(balances, list):
+          for b in balances:
+            curr = b.get("currency", "")
+            bal = float(b.get("balance", 0.0)) + float(b.get("locked", 0.0))
+            if curr == "KRW":
+              krw_balance = bal
+            else:
+              avg_p = float(b.get("avg_buy_price", 0.0))
+              coin_eval += bal * avg_p
+      except Exception:
+        pass
+
+    total_portfolio = krw_balance + coin_eval
+
+    # 4. 초기 자본 기반 누적 수익률 계산
+    initial_capital_env = os.getenv("UPBIT_INITIAL_CAPITAL", "").strip()
+    cum_return_pct = 0.0
+    if initial_capital_env:
+      try:
+        init_cap = float(initial_capital_env)
+        if init_cap > 0:
+          cum_return_pct = round((cum_pnl / init_cap) * 100, 2)
+      except Exception:
+        pass
+
+    row_data = [
+        today_str,
+        round(krw_balance),
+        round(coin_eval),
+        round(total_portfolio),
+        round(today_daily_pnl),
+        round(cum_pnl),
+        cum_return_pct,
+    ]
+
+    if today_row_idx is not None:
+      ws_trend.update(range_name=f"A{today_row_idx}:G{today_row_idx}", values=[row_data], value_input_option="USER_ENTERED")
+    else:
+      ws_trend.append_row(row_data, value_input_option="USER_ENTERED")
+
+  except Exception as e:
+    print(f"[경고] 날짜별 포트폴리오 추이 업데이트 실패: {e}")
+
+
+def save_trade_to_google_sheet(
     ticker: str,
     trade_type: str,
     event_name: str,
@@ -177,65 +839,82 @@ def save_trade_to_excel(
     realized_pnl_krw: float = 0.0,
     return_pct: float = 0.0,
     reason: str = "",
+    upbit_client=None,
 ):
-  """매매 체결 및 실현 손익 내역을 실행 폴더 내 단일 엑셀 파일(trade_history.xlsx)에 누적 자동 저장"""
+  """매매 체결 및 실현 손익 내역을 구글 스프레드시트 3개 시트에 누적 저장 및 차트 갱신"""
   try:
+    doc = get_google_sheet_doc()
+    if doc is None:
+      json_path = GOOGLE_SERVICE_ACCOUNT_JSON
+      if not os.path.isabs(json_path):
+        json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), json_path)
+      if not os.path.exists(json_path):
+        print(f"[경고] 구글 시트 저장 비활성화: 서비스 계정 키 파일('{GOOGLE_SERVICE_ACCOUNT_JSON}')을 찾을 수 없습니다.")
+      else:
+        print("[오류] 구글 시트 오픈 실패: GOOGLE_SPREADSHEET_ID 또는 GOOGLE_SPREADSHEET_TITLE 설정을 확인하세요.")
+      return
+
+    ws_trades, ws_trend, ws_chart = get_or_create_worksheets(doc)
+
     now = datetime.datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
-
-    excel_file = "trade_history.xlsx"
 
     pnl_val = round(realized_pnl_krw) if trade_type == "매도" else 0
     ret_val = round(return_pct * 100, 2) if trade_type == "매도" else 0.0
 
-    row_data = {
-        "일시": time_str,
-        "종목코드": ticker,
-        "구분": trade_type,
-        "매매 전략": event_name,
-        "체결가(원)": round(price, 8) if price < 1 else round(price, 2),
-        "체결수량": round(volume, 8),
-        "거래금액(원)": round(amount_krw),
-        "평단가(원)": (
-            round(entry_price, 8) if entry_price < 1 else round(entry_price, 2)
-        ),
-        "실현손익(원)": pnl_val,
-        "수익률(%)": ret_val,
-        "사유/비고": reason,
-    }
+    price_val = round(price, 8) if price < 1 else round(price, 2)
+    entry_price_val = round(entry_price, 8) if entry_price < 1 else round(entry_price, 2)
 
-    if os.path.exists(excel_file):
-      try:
-        df_existing = pd.read_excel(excel_file)
-        df_updated = pd.concat(
-            [df_existing, pd.DataFrame([row_data])], ignore_index=True
-        )
-      except Exception:
-        df_updated = pd.DataFrame([row_data])
-    else:
-      df_updated = pd.DataFrame([row_data])
+    row_data = [
+        time_str,
+        ticker,
+        trade_type,
+        event_name,
+        price_val,
+        round(volume, 8),
+        round(amount_krw),
+        entry_price_val,
+        pnl_val,
+        ret_val,
+        reason,
+    ]
 
-    with pd.ExcelWriter(excel_file, engine="openpyxl") as writer:
-      df_updated.to_excel(writer, index=False, sheet_name="매매기록")
+    # 1. '체결기록' 시트에 매매 내역 추가
+    ws_trades.append_row(row_data, value_input_option="USER_ENTERED")
 
-      worksheet = writer.sheets["매매기록"]
-      for col in worksheet.columns:
-        max_len = max(len(str(cell.value or "")) for cell in col)
-        col_letter = col[0].column_letter
-        worksheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
+    # 2. '날짜별 포트폴리오 추이' 시트 갱신
+    update_daily_portfolio_snapshot(doc, ws_trades, ws_trend, upbit_client=upbit_client)
 
+    # 3. '손익차트' 시트에 Combo 차트 생성
+    ensure_pnl_combo_chart(doc, ws_trend, ws_chart)
+
+    sheet_info = doc.title
     if trade_type == "매도":
       print(
-          f" └ [엑셀 저장] '{excel_file}' 기록 완료 (실현손익: {pnl_val:+,.0f}원"
+          f" └ [구글 시트 저장] '{sheet_info}' -> '체결기록' & '포트폴리오 추이' 기록 완료 (실현손익: {pnl_val:+,.0f}원"
           f" | 수익률: {ret_val:+.2f}%)"
       )
     else:
       print(
-          f" └ [엑셀 저장] '{excel_file}' 기록 완료 (매수 금액:"
+          f" └ [구글 시트 저장] '{sheet_info}' -> '체결기록' & '포트폴리오 추이' 기록 완료 (매수 금액:"
           f" {round(amount_krw):,}원)"
       )
   except Exception as e:
-    print(f"[오류] 엑셀 매매 기록 저장 실패: {e}")
+    print(f"[오류] 구글 시트 매매 기록 저장 실패: {e}")
+
+
+def sync_google_sheet_daily_snapshot(upbit_client=None):
+  """모니터링 주기 시작 시 구글 시트 3개 시트 구조 점검 및 오늘자 포트폴리오 추이 동기화"""
+  try:
+    doc = get_google_sheet_doc()
+    if doc is None:
+      return
+
+    ws_trades, ws_trend, ws_chart = get_or_create_worksheets(doc)
+    update_daily_portfolio_snapshot(doc, ws_trades, ws_trend, upbit_client=upbit_client)
+    ensure_pnl_combo_chart(doc, ws_trend, ws_chart)
+  except Exception:
+    pass
 
 
 
@@ -560,7 +1239,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 
-        save_trade_to_excel(
+        save_trade_to_google_sheet(
             ticker=ticker,
             trade_type="매도",
             event_name="SELL (STOP LOSS)",
@@ -632,7 +1311,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
           f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
       )
 
-      save_trade_to_excel(
+      save_trade_to_google_sheet(
           ticker=ticker,
           trade_type="매수",
           event_name="BUY (RE-ENTRY)",
@@ -700,7 +1379,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
-          save_trade_to_excel(
+          save_trade_to_google_sheet(
               ticker=ticker,
               trade_type="매수",
               event_name="BUY (BREAKOUT ALL-IN)",
@@ -739,7 +1418,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
-          save_trade_to_excel(
+          save_trade_to_google_sheet(
               ticker=ticker,
               trade_type="매수",
               event_name=f"BUY (PULLBACK 1/{target_scale_in_steps})",
@@ -797,7 +1476,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
-          save_trade_to_excel(
+          save_trade_to_google_sheet(
               ticker=ticker,
               trade_type="매수",
               event_name="BUY (BREAKOUT FULL SCALE-IN)",
@@ -839,7 +1518,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
-          save_trade_to_excel(
+          save_trade_to_google_sheet(
               ticker=ticker,
               trade_type="매수",
               event_name=f"BUY (PULLBACK {state['scale_in_count']}/{target_scale_in_steps})",
@@ -900,7 +1579,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 
-        save_trade_to_excel(
+        save_trade_to_google_sheet(
             ticker=ticker,
             trade_type="매도",
             event_name="PARTIAL SELL (SYMMETRY 50%)",
@@ -949,7 +1628,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state):
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 
-        save_trade_to_excel(
+        save_trade_to_google_sheet(
             ticker=ticker,
             trade_type="매도",
             event_name="SELL (MA5 DOWN)",
@@ -1001,6 +1680,8 @@ def run_market_scan():
   """5분마다 실행되어 09:07 스캐너(scan_ref_candles.py)가 공유한 활성 기준봉 종목만 실시간 점검"""
   global_state = load_state()
   client = UpbitClient(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)
+
+  sync_google_sheet_daily_snapshot(client)
 
   warning_tickers = get_upbit_warning_tickers()
   combined_exclude = set(EXCLUDE_TICKERS + warning_tickers)
