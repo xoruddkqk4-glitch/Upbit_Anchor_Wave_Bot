@@ -254,7 +254,7 @@ def detect_reference_candles(df):
 
 
 def scan_all_reference_candles():
-    """매일 09:07 KST 실행: 업비트 종목별 기준봉 탐색 후 bot_state.json 갱신"""
+    """매일 09:07 KST 실행: 업비트 종목별 기준봉 탐색 후 bot_state.json 갱신 및 텔레그램 일괄 발송"""
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 80)
     print(f" [스캔] [{now_str}] 매일 09:07 KST 기준봉(Reference Candle) 전용 스캐너 실행")
@@ -271,6 +271,7 @@ def scan_all_reference_candles():
         )
 
     detected_count = 0
+    all_reported_candles = []
 
     for ticker in target_tickers:
         try:
@@ -306,18 +307,12 @@ def scan_all_reference_candles():
                 }
 
             state = global_state[ticker]
+            curr_close = float(df.iloc[-1]["close"])
 
             if ref_indices:
                 latest_ref_idx = ref_indices[-1]
                 ref_date_str = latest_ref_idx.strftime("%Y-%m-%d")
                 prev_ref_date = state.get("active_ref_date")
-
-                # 동일한 기준일의 기준봉이 이미 등록되어 있는 경우 중복 수신 방지를 위해 스캔 패스
-                if prev_ref_date == ref_date_str:
-                    print(
-                        f"  [패스] {ticker} -> 동일한 기준봉 감시 중 (스캔 건너뜀, 기준일: {ref_date_str})"
-                    )
-                    continue
 
                 ref_row = df.loc[latest_ref_idx]
                 ref_pos = df.index.get_loc(latest_ref_idx)
@@ -340,9 +335,7 @@ def scan_all_reference_candles():
                 swing_low_price = float(df["low"].iloc[lookback_start : ref_pos + 1].min())
                 wave_height = ref_high - swing_low_price
 
-                curr_close = float(df.iloc[-1]["close"])
-
-                # [사전 필터링] 현재가가 손절가(기준봉 저가) 이하로 이미 이탈한 무효화된 기준봉은 등록하지 않고 무시
+                # [사전 필터링] 현재가가 손절가(기준봉 저가) 이하로 이미 이탈한 무효화된 기준봉은 해제 후 패스
                 if curr_close < effective_ref_low:
                     print(
                         f"  [손절선 이탈 무시] {ticker} -> 기준일: {ref_date_str} |"
@@ -353,7 +346,7 @@ def scan_all_reference_candles():
                         state["active_ref_date"] = None
                     continue
 
-                # 새로 발견되었거나 더 최신 날짜로 갱신된 기준봉 정보 업데이트
+                # 유효한 기준봉 업데이트
                 state["active_ref_date"] = ref_date_str
                 state["ref_high"] = ref_high
                 state["effective_ref_low"] = effective_ref_low
@@ -361,51 +354,64 @@ def scan_all_reference_candles():
                 state["rise_duration"] = int(rise_duration)
                 state["wave_height"] = wave_height
 
-                detected_count += 1
-                if prev_ref_date:
+                if prev_ref_date == ref_date_str:
+                    tag = "감시 중"
+                    print(
+                        f"  [감시 중] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
+                        f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
+                    )
+                elif prev_ref_date:
+                    tag = "최신 갱신"
+                    detected_count += 1
                     print(
                         f"  [기준봉 갱신] {ticker} -> 이전 기준일({prev_ref_date}) => 최신 기준일({ref_date_str}) 갱신! | 현재가: {format_price(curr_close)} |"
                         f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
                     )
                 else:
+                    tag = "신규 포착"
+                    detected_count += 1
                     print(
-                        f"  [포착] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
+                        f"  [신규 포착] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
                         f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
                     )
 
-                # 현재가 위치에 맞게 고가/중심가/손절가 계층 순서로 가격 블록 동적 구성 (가시성 강조 및 유효 소수점 최대 8자리 자동 표기)
-                high_line = f"• <b>고가</b>: {format_price(ref_high)}"
-                mid_line = f"• <b>중심가</b>: {format_price(ref_mid)}"
-                low_line = f"• <b>손절가</b>: {format_price(effective_ref_low)}"
-
-                if curr_close >= ref_high:
-                    curr_line = f"🚀 <b>[현재가] (고가 돌파)</b>: <u><b>{format_price(curr_close)}</b></u>"
-                    price_hierarchy = [curr_line, high_line, mid_line, low_line]
-                elif curr_close >= ref_mid:
-                    curr_line = f"📍 <b>[현재가]</b>: <u><b>{format_price(curr_close)}</b></u>"
-                    price_hierarchy = [high_line, curr_line, mid_line, low_line]
-                elif curr_close >= effective_ref_low:
-                    curr_line = f"🎯 <b>[현재가] (눌림목 영역)</b>: <u><b>{format_price(curr_close)}</b></u>"
-                    price_hierarchy = [high_line, mid_line, curr_line, low_line]
-                else:
-                    curr_line = f"🚨 <b>[현재가] (손절가 하회)</b>: <u><b>{format_price(curr_close)}</b></u>"
-                    price_hierarchy = [high_line, mid_line, low_line, curr_line]
-
-                price_block = "\n".join(price_hierarchy)
-
-                title_str = "최신 기준봉 갱신!" if prev_ref_date else "09:07 KST 기준봉 포착!"
-                # 텔레그램 알림 메시지 발송
-                telegram_msg = (
-                    f"<b>[BST 봇] {title_str}</b>\n"
-                    f"• <b>종목</b>: {ticker}\n"
-                    f"• <b>기준일</b>: {ref_date_str}\n"
-                    f"{price_block}"
-                )
-                SendMessage(telegram_msg)
+                all_reported_candles.append({
+                    "ticker": ticker,
+                    "ref_date": ref_date_str,
+                    "tag": tag,
+                    "curr_close": curr_close,
+                    "ref_high": ref_high,
+                    "ref_mid": ref_mid,
+                    "effective_ref_low": effective_ref_low,
+                })
             else:
-                # 활성 포지션(보유 중)이 아닐 때만 active_ref_date = None으로 해제
-                if not state["entry_bought"]:
-                    state["active_ref_date"] = None
+                # ref_indices가 추출되지 않은 경우라도, 기존 active_ref_date가 유효하고 손절가 상회 시 감시 중으로 포함
+                active_ref_date = state.get("active_ref_date")
+                effective_ref_low = state.get("effective_ref_low", 0.0)
+                ref_mid = state.get("ref_mid", 0.0)
+                ref_high = state.get("ref_high", 0.0)
+
+                if active_ref_date and effective_ref_low > 0:
+                    if curr_close >= effective_ref_low:
+                        print(
+                            f"  [기존 감시 유지] {ticker} -> 기준일: {active_ref_date} | 현재가: {format_price(curr_close)} |"
+                            f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
+                        )
+                        all_reported_candles.append({
+                            "ticker": ticker,
+                            "ref_date": active_ref_date,
+                            "tag": "감시 중",
+                            "curr_close": curr_close,
+                            "ref_high": ref_high,
+                            "ref_mid": ref_mid,
+                            "effective_ref_low": effective_ref_low,
+                        })
+                    else:
+                        if not state["entry_bought"]:
+                            state["active_ref_date"] = None
+                else:
+                    if not state["entry_bought"]:
+                        state["active_ref_date"] = None
 
             time.sleep(API_DELAY_SEC)
 
@@ -414,8 +420,75 @@ def scan_all_reference_candles():
             continue
 
     save_state(global_state)
+
+    # 텔레그램 일괄(단일) 메시지 발송
+    now_kst = datetime.datetime.now().strftime("%Y-%m-%d %H:%M KST")
+    if all_reported_candles:
+        new_count = sum(1 for c in all_reported_candles if c["tag"] in ["신규 포착", "최신 갱신"])
+        keep_count = sum(1 for c in all_reported_candles if c["tag"] == "감시 중")
+
+        msg_lines = [
+            "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>",
+            f"• <b>스캔 일시</b>: {now_kst}",
+            f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b> (신규/갱신: {new_count}개 | 감시 중: {keep_count}개)",
+            "----------------------------------------",
+        ]
+
+        for c in all_reported_candles:
+            ticker = c["ticker"]
+            ref_date = c["ref_date"]
+            tag_str = f"[{c['tag']}]"
+            curr_close = c["curr_close"]
+            ref_high = c["ref_high"]
+            ref_mid = c["ref_mid"]
+            effective_ref_low = c["effective_ref_low"]
+
+            if curr_close >= ref_high:
+                pos_tag = "🚀 (고가 돌파)"
+            elif curr_close >= ref_mid:
+                pos_tag = "📍 (중심가 상회)"
+            elif curr_close >= effective_ref_low:
+                pos_tag = "🎯 (눌림목 영역)"
+            else:
+                pos_tag = "🚨 (손절가 하회)"
+
+            block = (
+                f"<b>• {ticker}</b> <code>{tag_str}</code> (기준일: {ref_date})\n"
+                f"  - 현재가: <b>{format_price(curr_close)}</b> {pos_tag}\n"
+                f"  - 고가: {format_price(ref_high)} | 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)}"
+            )
+            msg_lines.append(block)
+
+        full_text = "\n".join(msg_lines)
+
+        if len(full_text) <= 3800:
+            SendMessage(full_text)
+        else:
+            header = (
+                "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>\n"
+                f"• <b>스캔 일시</b>: {now_kst}\n"
+                f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b>\n"
+                "----------------------------------------"
+            )
+            chunk = header
+            for c_block in msg_lines[4:]:
+                if len(chunk) + len(c_block) + 2 > 3800:
+                    SendMessage(chunk.strip())
+                    chunk = "<b>📊 [BST 봇] 기준봉 감시 현황 (이어서)</b>\n----------------------------------------\n" + c_block
+                else:
+                    chunk += "\n" + c_block
+            if chunk.strip():
+                SendMessage(chunk.strip())
+    else:
+        empty_msg = (
+            "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>\n"
+            f"• <b>스캔 일시</b>: {now_kst}\n"
+            "• <b>안내</b>: 현재 포착되었거나 유효하게 감시 중인 기준봉 종목이 없습니다."
+        )
+        SendMessage(empty_msg)
+
     print("=" * 80)
-    print(f" [완료] 스캔 완료: 총 {len(target_tickers)}개 감시 종목 중 {detected_count}개 기준봉 포착 완료")
+    print(f" [완료] 스캔 완료: 총 {len(target_tickers)}개 감시 종목 중 {len(all_reported_candles)}개 유효 기준봉 보고 완료 (신규/갱신: {detected_count}개)")
     print("=" * 80 + "\n")
 
 

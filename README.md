@@ -161,3 +161,16 @@
   - `python -m py_compile Upbit_Anchor_Wave_Bot.py create_dummy_data.py` 정적 구문 검사 통과 (Exit Code 0)
   - `python create_dummy_data.py` 백그라운드 데이터 연동 및 시트 대시보드 생성 완료 (Exit Code 0)
   - 구글 스프레드시트(`Upbit_Anchor_Wave`) 3개 시트에 100건 더미 데이터 및 리뉴얼된 '손익차트' KPI 대시보드 실시간 갱신 정상 동작 검증 완료
+
+## 📝 [2026-09-12 11:25] 업데이트 이력 (Commit ID: eadbbbe)
+- **수정 내용**:
+  1. **`scan_ref_candles.py` 텔레그램 알림 일괄 보고 방식 전면 개편**: 기존 종목별 개별 메시지 발송 방식을 폐기하고, 스캔 종료 후 전체 유효 기준봉을 하나의 `[기준봉 감시 현황 보고]` 메시지로 취합하여 단일 발송하도록 변경. 본문이 3,800자를 초과하는 경우 종목 블록 단위로 자동 분할(`이어서` 헤더) 발송 처리
+  2. **동일 기준일 중복 스캔 스킵(`continue`) 제거 및 상태 태그 3분류 도입**: 기존에는 `prev_ref_date == ref_date_str`인 종목을 조기 `continue`로 건너뛰어 보고 대상에서 누락되었으나, 이를 제거하고 `신규 포착` / `최신 갱신` / `감시 중` 3가지 태그로 분류하여 전 종목을 보고에 포함
+  3. **기준봉 미재추출 종목의 감시 연속성 확보**: `ref_indices`가 추출되지 않은 종목도 기존 `active_ref_date`가 유효하고 현재가가 손절가를 상회하는 경우 `[기존 감시 유지]`로 보고 대상에 포함하고, 손절가를 이탈한 경우에만 `active_ref_date`를 해제하도록 분기 세분화
+  4. **집계 지표 분리**: `detected_count`는 신규/갱신 건수만 집계하고, 전체 보고 건수는 `all_reported_candles` 길이 기준으로 분리하여 완료 로그에 함께 출력
+  5. **런타임 생성 파일 Git 추적 해제**: `.gitignore`에 `bot_state.json`을 등록하고, 기존에 추적 중이던 `__pycache__/*.pyc` 2건 및 `bot_state.json`을 `git rm -r --cached`로 추적 해제 (로컬 파일은 그대로 유지). 봇/스캐너 실행마다 작업 트리가 더럽혀지는 문제 해소
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료
+  - 스테이징 대상에서 에이전트 설정 파일(`CLAUDE.md`, `.claude/`) 제외 확인 완료 (사용자 요청에 따라 코드만 커밋)
+  - **미수행 항목**: `scan_ref_candles.py` 실제 실행 및 텔레그램 일괄 메시지 수신 검증은 이번 커밋에서 수행하지 않았습니다. 본 수정은 별도 도구로 작성된 변경분이며, `py_compile`은 구문 오류만 검출하므로 런타임 동작(분할 발송 경계 처리, `감시 중` 분기)은 실제 09:07 스캔 시 확인이 필요합니다

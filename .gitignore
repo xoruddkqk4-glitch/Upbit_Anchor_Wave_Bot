@@ -7,6 +7,7 @@ unheld_coin_record.json
 held_coin_record.json
 trade_ledger.json
 daily_snapshot.json
+bot_state.json
 mock_balances.json
 atr_cache.json
 ma5_check_record.json
