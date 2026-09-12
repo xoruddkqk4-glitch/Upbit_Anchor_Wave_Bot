@@ -243,7 +243,7 @@
   - **미수행 항목**: `run_market_scan` 자체는 네트워크가 필요해 직접 실행하지 않음. 선별 로직을 헬퍼로 분리한 이유가 이 부분의 오프라인 검증을 위해서임
   - **참고**: 유의종목 보유 중 매도가 부분 체결로 끝나면 `remaining_ratio > 0`이 유지되어 다음 주기에도 계속 감시됨(의도된 동작)
 
-## 📝 [2026-09-12 14:05] 업데이트 이력 (Commit ID: __COMMIT_HASH__)
+## 📝 [2026-09-12 14:05] 업데이트 이력 (Commit ID: 4930962)
 - **수정 내용** (전략 정밀 점검 5~9번, 파일: `Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`, `state_lock.py` 신규, `.gitignore`):
   0. **4번 정정**: 앞선 점검에서 "스캐너가 보유 중 기준봉을 덮어쓴다"고 지적했으나, 스캐너 루프 상단에 `entry_bought` 종목을 `[패스] continue`로 건너뛰는 가드가 이미 존재함을 확인. 업데이트 블록만 보고 내린 오판이며 4번은 수정 대상이 아님
   1. **[5번] 상태 파일 동시 쓰기 차단 (`state_lock.py` 신규)**: 봇(5분 주기)과 스캐너(09:07)가 같은 `bot_state.json`을 `load → 수정 → save`하므로 실행이 겹치면 나중에 저장한 쪽이 상대 변경을 지움(봇의 체결 기록이 사라지는 유령 포지션). 외부 의존성 없는 `StateFileLock`(`os.O_EXCL` 원자적 생성, 타임아웃 재시도, 15분 이상 방치된 락 회수, 컨텍스트 매니저)을 도입하고 두 스크립트의 실행 **전체**를 래퍼(`run_market_scan` → `_run_market_scan_locked`, `scan_all_reference_candles` → `_scan_all_reference_candles_locked`)로 감쌈. 락 획득 실패 시 무락 진행 대신 **이번 실행을 건너뛰고 텔레그램 경고**(5분 한 틱 누락 < 체결 기록 유실). 느린 봇 실행이 다음 크론 틱과 겹치는 경우도 동일 락이 차단. `.gitignore`에 `bot_state.json.lock` 추가. 같은 PC 프로세스 간에만 유효
