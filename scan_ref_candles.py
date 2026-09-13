@@ -29,7 +29,7 @@ REF_MIN_CHANGE_PCT = 0.10   # 기준봉 최소 상승률 (10% 이상 장대양�
 PULLBACK_RATIO = 0.5        # 눌림목 기준 비율 (0.5 = 중심가)
 REF_EXPIRY_DAYS = 20        # 기준봉 유효기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 만료<->재등록 순환 발생)
 PREV_HIGH_LOOKBACK_DAYS = 20  # 기준봉 판정용 전고점 룩백(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 봇·스캐너가 다른 기준봉 탐지)
-SWING_LOW_LOOKBACK_DAYS = 10  # 1차 파동 스윙 저점 탐색 기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지
+SWING_LOW_LOOKBACK_DAYS = 20  # 1차 파동 스윙 저점 탐색 기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지
 MAX_TARGET_COUNT = 20       # 스캔 대상 최대 코인 수
 API_DELAY_SEC = 0.1         # API 요청 간격
 

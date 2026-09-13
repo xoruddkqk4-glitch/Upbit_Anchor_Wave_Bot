@@ -335,3 +335,22 @@
   - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-13 22:40] 업데이트 이력 (Commit ID: pending)
+- **수정 내용**:
+  1. **[Step 2] 손절폭 기반 변동성 가중 사이징 (Risk Parity) 구현 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 1회 손절 시 감내할 최대 손실금(`MAX_LOSS_PER_TRADE_KRW = 30000원`)을 기준으로 진입가-손절가 이격률을 역산하여 종목별 총 배정 금액을 계산하는 `calc_position_size()` 도입
+     - 손절폭이 타이트한 코인은 상한선(100만 원), 변동성이 큰 잡알트코인은 축소 배정(예: 손절폭 15% 시 20만 원 배정)하여 포트폴리오 리스크를 균등화
+     - 상태 머신(`new_ticker_state`)에 `target_buy_amount`를 기록하여 눌림목 1/3, 2/3, 3/3차 및 돌파 전환 매수 시 일관된 배정 기준 연동
+  2. **[Step 3-1] 5일선 매도 0.5% 장중 휩소 방지 버퍼 도입 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 5일선 기울기 꺾임(`curr_ma5 < prev_ma5`)뿐만 아니라, 현재가가 5일선 대비 0.5% 이상 실질 하향 이탈(`curr_close < curr_ma5 * (1 - MA5_EXIT_BUFFER_PCT)`)했을 때만 잔여 전액 매도를 집행하도록 보정
+     - 장중 미세 꼬리 흔들림으로 인한 잦은 조기 매도 및 톱니 수수료 손실 방어
+  3. **스윙 저점 룩백 기간 20일 확대 (`Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`)**:
+     - `SWING_LOW_LOOKBACK_DAYS`를 10일에서 20일로 확대하여 20일 전고점 돌파 기준봉의 파동 주기와 완벽히 일치화
+     - 1차 파동 높이(`wave_height`) 및 상승 기간(`rise_duration`) 산출 왜곡을 해소하여 2차 파동 대칭 익절 목표가 정상화
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **단위 시나리오 검증 완료**: 손절폭 3% 100만원 상한 / 손절폭 15% 20만원 배정 / 5일선 꺾임 버퍼 미달 시 매도 보류 / 버퍼 초과 시 정상 매도 확인
+  - **엔드투엔드 진입 검증 완료**: 알트코인 기준봉 눌림목 1차 분할 매수 연동 정상 검증
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+

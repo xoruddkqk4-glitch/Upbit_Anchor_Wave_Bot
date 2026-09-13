@@ -104,7 +104,7 @@ PREV_HIGH_LOOKBACK_DAYS = (
     20  # 기준봉 판정용 전고점 룩백(일): 종가가 이 기간 고가를 돌파해야 기준봉. 20=현행 동작. scan_ref_candles.py와 동일 값 유지
 )
 SWING_LOW_LOOKBACK_DAYS = (
-    10  # 1차 파동 스윙 저점 탐색 기간(일): 기준봉 직전 N일 내 최저가 -> wave_height·rise_duration 산출. scan_ref_candles.py와 동일 값 유지
+    20  # 1차 파동 스윙 저점 탐색 기간(일): 기준봉 직전 N일 내 최저가 -> wave_height·rise_duration 산출. scan_ref_candles.py와 동일 값 유지
 )
 USE_TIME_SYMMETRY_EXIT = True  # 매도 시 기간 대칭 알고리즘 반영 여부[cite: 2]
 TIME_SYMMETRY_TOLERANCE_DAYS = 1  # 기간 대칭 허용 오차 (±1일)
@@ -119,6 +119,11 @@ BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 진입 손절선 상한: 직전 확정봉
 # 주문 금액 및 시스템 설정 (종목당 최대 매수 금액 설정)
 MAX_BUY_AMOUNT_KRW = 1000000  # 종목당 최대 매수 실행 금액 (원 단위: 기본 100만원 = 1,000,000원)
 ORDER_AMOUNT_KRW = MAX_BUY_AMOUNT_KRW  # 종목당 총 매수 실행 금액
+MIN_BUY_AMOUNT_KRW = 5000  # 업비트 KRW 마켓 최소 주문 가능 금액 (5,000원)
+ENABLE_VOLATILITY_SIZING = True  # 손절폭 기반 변동성 가중 사이징(Risk Parity) 활성화 여부
+MAX_LOSS_PER_TRADE_KRW = 30000  # 1회 손절 시 허용 최대 손실금 (원 단위: 기본 3만 원 = 100만원 기준 3% 리스크)
+ENABLE_MA5_EXIT_BUFFER = True  # 5일선 꺾임 매도 시 장중 휩소 방지 버퍼 활성화 여부
+MA5_EXIT_BUFFER_PCT = 0.005  # 5일선 하향 이탈 허용 버퍼 (0.005 = 0.5% 이상 실질 하향 이탈 시에만 매도)
 MAX_OPEN_POSITIONS = 5  # 동시 보유 종목 수 상한 (신규 진입·재매수에만 적용, 분할 추가 매수는 기존 포지션이라 제외). 최대 노출 = 상한 × ORDER_AMOUNT_KRW
 API_DELAY_SEC = 0.1  # API 요청 간격 (초)
 
@@ -1370,6 +1375,26 @@ def build_partial_fill_note(target_volume, filled_volume):
   )
 
 
+def calc_position_size(entry_price, stop_loss_price, max_amount=MAX_BUY_AMOUNT_KRW):
+  """손절폭 기반 변동성 가중 포지션 사이징(Risk Parity) -> 목표 매수 총금액(KRW)
+
+  손절폭((entry - stop) / entry)에 비례하여 투자금을 조절함으로써 1회 손절 시 잃는
+  최대 손실금을 MAX_LOSS_PER_TRADE_KRW(기본 3만 원) 수준으로 균등화한다.
+  - 손절폭이 큰 고변동성 알트코인은 적게 매수하여 계좌 타격 방어
+  - 손절폭이 타이트한 메이저 코인은 최대 max_amount(100만 원)까지 매수
+  - 최소 주문액(MIN_BUY_AMOUNT_KRW) ~ 최대 주문액(max_amount) 범위로 클램핑
+  """
+  if not ENABLE_VOLATILITY_SIZING or entry_price <= 0:
+    return float(max_amount)
+
+  stop_dist_pct = abs(entry_price - stop_loss_price) / entry_price if entry_price > 0 else 0.0
+  if stop_dist_pct <= 0:
+    return float(max_amount)
+
+  target_amount = MAX_LOSS_PER_TRADE_KRW / stop_dist_pct
+  return float(min(max(target_amount, MIN_BUY_AMOUNT_KRW), max_amount))
+
+
 # ==============================================================================
 # [3. 5분 주기 모니터링 및 전략 집행 엔진 (BST 개선안 반영)]
 # ==============================================================================
@@ -1406,6 +1431,7 @@ def new_ticker_state():
       "price_tp_executed": False,
       "scale_in_count": 0,
       "last_scale_in_date": None,
+      "target_buy_amount": None,  # 변동성 사이징으로 산출된 총 배정 금액 (분할 매수 및 돌파 잔액 기준)
       "base_price": None,
       "base_amount": None,  # 5일선 매도 시점의 실제 매도 금액. 재매수 시 이 금액만큼만 되사서 포지션 크기를 매도 직전과 맞춘다
       "base_price_date": None,  # 5일선 매도 일자. 재매수 시 왕복 소요일수·비용을 로깅하는 데 사용(제한 용도 아님)
@@ -1718,18 +1744,23 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         )
       if not state["entry_bought"] and can_open_new:
         if is_breakout:
-          # 1) 돌파 매매: 3분할이 아닌 100만원 전액 즉시 매수 + 손절가를 직전 확정봉 저가(상한 적용)로 상향 재조정
-          fill = execute_buy(upbit_client, ticker, ORDER_AMOUNT_KRW, curr_close)
+          # 1) 돌파 매매: 손절선(직전 확정봉 저가, 상한 적용) 기반 변동성 사이징 산출 후 전액 매수
+          prev_low = state["effective_ref_low"]
+          expected_stop, _ = calc_breakout_stop(
+              confirmed_low, curr_close, prev_low
+          )
+          target_amount = calc_position_size(curr_close, expected_stop)
+          fill = execute_buy(upbit_client, ticker, target_amount, curr_close)
           if fill["ok"]:
             state["entry_bought"] = True
             state["entry_price"] = fill["price"]
             state["total_volume"] = fill["volume"]
             state["remaining_ratio"] = 1.0
+            state["target_buy_amount"] = target_amount
             state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
             state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
             state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
             state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
-            prev_low = state["effective_ref_low"]
             new_stop, stop_basis = calc_breakout_stop(
                 confirmed_low, fill["price"], prev_low
             )
@@ -1746,7 +1777,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 f"<b>🚀 [BST 봇] 돌파 매수 발생! (BREAKOUT ALL-IN)</b>\n"
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
-                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (100% 전액 매수)\n"
+                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (배정 총액 {target_amount:,.0f}원 중 100% 전액 매수)\n"
                 f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
@@ -1759,18 +1790,23 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 volume=fill["volume"],
                 amount_krw=fill["amount"],
                 entry_price=fill["price"],
-                reason="마감확정일봉 기준봉 고가 완벽 상향 돌파 100% 전액 매수",
+                reason=(
+                    f"마감확정일봉 기준봉 고가 완벽 상향 돌파 100% 전액 매수"
+                    f" (변동성 배정: {target_amount:,.0f}원)"
+                ),
             )
 
         elif is_pullback:
-          # 2) 눌림목 매매: 1차 분할 매수 진행 (1/3 금액)
-          tranche_amount = ORDER_AMOUNT_KRW / target_scale_in_steps
+          # 2) 눌림목 매매: 손절가(기준봉 저가) 기반 변동성 사이징 산출 후 1차 분할 매수 진행 (1/3 금액)
+          target_amount = calc_position_size(curr_close, state["effective_ref_low"])
+          tranche_amount = target_amount / target_scale_in_steps
           fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
           if fill["ok"]:
             state["entry_bought"] = True
             state["entry_price"] = fill["price"]
             state["total_volume"] = fill["volume"]
             state["remaining_ratio"] = 1.0
+            state["target_buy_amount"] = target_amount
             state["scale_in_count"] = 1
             state["last_scale_in_date"] = curr_candle_date  # 1일 1회 분할 매수 제한
             state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용, 추가 매수 시 유지)
@@ -1817,10 +1853,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           and state["remaining_ratio"] > 0
       ):
         if is_breakout:
-          # 1) 눌림목 1~2회차 진행 중 고가 돌파 시: 남은 금액을 전액(한번에) 매수하여 100만 원 채우고 손절가 상향
+          # 1) 눌림목 1~2회차 진행 중 고가 돌파 시: 남은 금액을 전액(한번에) 매수하여 배정 금액 채우고 손절가 상향
+          allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
           remaining_steps = target_scale_in_steps - state["scale_in_count"]
           remaining_amount = (
-              ORDER_AMOUNT_KRW / target_scale_in_steps
+              allocated_total / target_scale_in_steps
           ) * remaining_steps
           fill = execute_buy(upbit_client, ticker, remaining_amount, curr_close)
           if fill["ok"]:
@@ -1871,7 +1908,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           # 2) 순수 추가 눌림목 조건 만족 시: 1/3 금액만큼 다음 회차 분할 매수 진행
           # (같은 확정봉 기준으로 하루 내내 조건이 유지되므로, 1일 1회로 제한해
           #  5분 주기마다 연속 체결되는 것을 방지)
-          tranche_amount = ORDER_AMOUNT_KRW / target_scale_in_steps
+          allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
+          tranche_amount = allocated_total / target_scale_in_steps
           fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
           if fill["ok"]:
             state["scale_in_count"] += 1
@@ -2072,7 +2110,15 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
       # B. 5일선 꺾임(하향 이탈) 체크 -> 잔여 전액 매도 후 기준 가격 기록
       #    (가격 대칭 2단계가 같은 틱에 잔여 전량을 청산했으면 수량 0 주문을 내지 않도록 재확인)
-      if curr_ma5 < prev_ma5 and state["remaining_ratio"] > 0:
+      #    ENABLE_MA5_EXIT_BUFFER=True인 경우 단순히 5일선 기울기만 꺾인 것으로는 팔지 않고,
+      #    현재가가 5일선 대비 최소 MA5_EXIT_BUFFER_PCT(0.5%) 이상 유의미하게 하향 이탈했을 때만 매도 (장중 미세 흔들림 휩소 방지)
+      is_ma5_down = curr_ma5 < prev_ma5
+      if ENABLE_MA5_EXIT_BUFFER:
+        is_ma5_down = is_ma5_down and (
+            curr_close < curr_ma5 * (1.0 - MA5_EXIT_BUFFER_PCT)
+        )
+
+      if is_ma5_down and state["remaining_ratio"] > 0:
         target_vol = state["total_volume"] * state["remaining_ratio"]
         fill = execute_sell(upbit_client, ticker, target_vol, curr_close)
         if fill["ok"]:
@@ -2096,11 +2142,17 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["base_amount"] = sell_amount
             state["base_price_date"] = curr_candle_date
 
+          buffer_note = (
+              f" (5일선 {format_price(curr_ma5)} 대비"
+              f" {MA5_EXIT_BUFFER_PCT * 100:.1f}% 버퍼 이탈 확인)"
+              if ENABLE_MA5_EXIT_BUFFER
+              else ""
+          )
           signals.append({
               "Ticker": ticker,
               "Event": "SELL (MA5 DOWN)",
               "Price": sell_price,
-              "Reason": f"5일선 꺾임 전액 매도 -> 기준 가격 기록: {sell_price}",
+              "Reason": f"5일선 꺾임{buffer_note} 전액 매도 -> 기준 가격 기록: {sell_price}",
           })
 
           # 텔레그램 5일선 추세 매도 알림
@@ -2110,7 +2162,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f"• <b>매도가</b>: {format_price(sell_price)}\n"
               f"• <b>수익률</b>: <b>{ret_pct * 100:+.2f}%</b>\n"
               f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b> (수수료 차감)\n"
-              f"• <b>사유</b>: 5일선 하향 꺾임 -> 잔여 전액 매도 (기준가 {format_price(sell_price)} 기록)"
+              f"• <b>사유</b>: 5일선 하향 꺾임{buffer_note} -> 잔여 전액 매도 (기준가 {format_price(sell_price)} 기록)"
               f"{fill_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
@@ -2126,8 +2178,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               realized_pnl_krw=realized_pnl,
               return_pct=ret_pct,
               reason=(
-                  f"5일선 하향 꺾임 잔여 전액 매도 (기준가 {format_price(sell_price)}"
-                  " 기록)"
+                  f"5일선 하향 꺾임{buffer_note} 잔여 전액 매도"
+                  f" (기준가 {format_price(sell_price)} 기록)"
               ),
           )
 
