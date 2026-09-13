@@ -323,3 +323,15 @@
   - `.env`, `service_account.json` 미추적 재확인, `AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출
   - **테스트 중 실수 1건**: 1차 검증에서 제 테스트 문구("왕복"이라는 리터럴 단어 포함 여부)가 실제 문구("매도가 대비 N%에 재매수")와 달라 실패했으나, 데이터 자체(`+7.37%`, `3일 만`)는 처음부터 정확했음. 테스트 표현만 수정해 재검증
 - **17개 전략 점검 항목 전체 처리 완료**: 완료 1~3·5~8·9-A(로깅)·9-B·10·16·11~13·15·17, 오판 정정 4. **운용 후 데이터 보고 결정 보류**: 14(손절폭 기준 사이징), 10-A(`MIN_TAKE_PROFIT_PCT` 상향 여부), 규칙 5(고가 아래 기간 대칭을 매수 근거로 활용, 현재는 `INFO` 이벤트로 관찰만 기록 중)
+
+## 📝 [2026-09-13 22:14] 업데이트 이력 (Commit ID: pending)
+- **수정 내용**:
+  1. **`.gitignore` 에이전트 설정 파일 제외 반영**: 프로젝트 관리 방침에 따라 로컬 에이전트 설정 파일인 `CLAUDE.md` 및 `.claude/` 디렉터리를 `.gitignore`에 등록하여 Git 추적 및 스테이징에서 원천 제외
+  2. **에이전트 실행 규칙 최적화 (`.agents/rules/rules.md`, `AGENTS.md`)**: 파이썬 CLI/트레이딩 봇 환경에 맞춰 터미널 기반 정적 검증(`python -m py_compile`), 브라우저 구동 금지, 검증 시 실주문 API(`/v1/orders`) 및 `.env`의 `AUTO_TRADE_EXECUTE` 변경 절대 금지 원칙 명문화 및 루트 `AGENTS.md` 정비
+  3. **`/save-djt` 워크스페이스 스킬 추가 (`.agents/skills/save-djt/SKILL.md`)**: 세션 중단 및 재개 준비를 위한 스킬 사양 정의 (대화 기록 보존, 작업 트리 점검, 재개 지점 기록)
+- **검증 결과**:
+  - `git check-ignore -v CLAUDE.md .claude/skills/ask/SKILL.md` 확인 완료 (정상 제외 필터링)
+  - `git status` 확인 결과 `CLAUDE.md` 및 `.claude/` 미추적 목록에서 정상 제거 및 제외 확인
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
