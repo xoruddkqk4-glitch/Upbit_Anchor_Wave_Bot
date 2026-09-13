@@ -469,13 +469,14 @@ def _scan_all_reference_candles_locked():
         new_count = sum(1 for c in all_reported_candles if c["tag"] in ["신규 포착", "최신 갱신"])
         keep_count = sum(1 for c in all_reported_candles if c["tag"] == "감시 중")
 
-        msg_lines = [
-            "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>",
-            f"• <b>스캔 일시</b>: {now_kst}",
-            f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b> (신규/갱신: {new_count}개 | 감시 중: {keep_count}개)",
-            "----------------------------------------",
-        ]
+        header_text = (
+            "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>\n"
+            f"• <b>스캔 일시</b>: {now_kst}\n"
+            f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b> (신규/갱신: {new_count}개 | 감시 중: {keep_count}개)\n"
+            "----------------------------------------"
+        )
 
+        candle_blocks = []
         for c in all_reported_candles:
             ticker = c["ticker"]
             ref_date = c["ref_date"]
@@ -486,39 +487,40 @@ def _scan_all_reference_candles_locked():
             effective_ref_low = c["effective_ref_low"]
 
             if curr_close >= ref_high:
-                pos_tag = "🚀 (고가 돌파)"
+                pos_icon = "🚀"
+                pos_label = "고가 돌파"
             elif curr_close >= ref_mid:
-                pos_tag = "📍 (중심가 상회)"
+                pos_icon = "📍"
+                pos_label = "중심가 상회"
             elif curr_close >= effective_ref_low:
-                pos_tag = "🎯 (눌림목 영역)"
+                pos_icon = "🎯"
+                pos_label = "눌림목 영역"
             else:
-                pos_tag = "🚨 (손절가 하회)"
+                pos_icon = "🚨"
+                pos_label = "손절가 하회"
 
             block = (
                 f"<b>• {ticker}</b> <code>{tag_str}</code> (기준일: {ref_date})\n"
-                f"  - 현재가: <b>{format_price(curr_close)}</b> {pos_tag}\n"
-                f"  - 고가: {format_price(ref_high)} | 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)}"
+                f"{pos_icon} <b>[현재가] ({pos_label})</b>: {format_price(curr_close)}\n"
+                f"• 고가: {format_price(ref_high)}\n"
+                f"• 중심가: {format_price(ref_mid)}\n"
+                f"• 손절가: {format_price(effective_ref_low)}"
             )
-            msg_lines.append(block)
+            candle_blocks.append(block)
 
-        full_text = "\n".join(msg_lines)
+        all_blocks = [header_text] + candle_blocks
+        full_text = "\n\n".join(all_blocks)
 
         if len(full_text) <= 3800:
             SendMessage(full_text)
         else:
-            header = (
-                "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>\n"
-                f"• <b>스캔 일시</b>: {now_kst}\n"
-                f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b>\n"
-                "----------------------------------------"
-            )
-            chunk = header
-            for c_block in msg_lines[4:]:
+            chunk = header_text
+            for c_block in candle_blocks:
                 if len(chunk) + len(c_block) + 2 > 3800:
                     SendMessage(chunk.strip())
-                    chunk = "<b>📊 [BST 봇] 기준봉 감시 현황 (이어서)</b>\n----------------------------------------\n" + c_block
+                    chunk = "<b>📊 [BST 봇] 기준봉 감시 현황 (이어서)</b>\n----------------------------------------\n\n" + c_block
                 else:
-                    chunk += "\n" + c_block
+                    chunk += "\n\n" + c_block
             if chunk.strip():
                 SendMessage(chunk.strip())
     else:
