@@ -535,12 +535,24 @@ def _scan_all_reference_candles_locked():
                 pos_icon = "🚨"
                 pos_label = "손절가 하회"
 
+            price_line = f"{pos_icon} <b>[현재가] ({pos_label})</b>: {format_price(curr_close)}"
+            high_line = f"• 고가: {format_price(ref_high)}"
+            mid_line = f"• 중심가: {format_price(ref_mid)}"
+            low_line = f"• 손절가: {format_price(effective_ref_low)}"
+
+            # 가격 사다리(Price Ladder) 순서에 맞춰 현재가 행을 동적으로 배치
+            if curr_close >= ref_high:
+                price_rows = [price_line, high_line, mid_line, low_line]
+            elif curr_close >= ref_mid:
+                price_rows = [high_line, price_line, mid_line, low_line]
+            elif curr_close >= effective_ref_low:
+                price_rows = [high_line, mid_line, price_line, low_line]
+            else:
+                price_rows = [high_line, mid_line, low_line, price_line]
+
             block = (
                 f"<b>• {ticker}</b> <code>{tag_str}</code> (기준일: {ref_date})\n"
-                f"{pos_icon} <b>[현재가] ({pos_label})</b>: {format_price(curr_close)}\n"
-                f"• 고가: {format_price(ref_high)}\n"
-                f"• 중심가: {format_price(ref_mid)}\n"
-                f"• 손절가: {format_price(effective_ref_low)}"
+                + "\n".join(price_rows)
             )
             candle_blocks.append(block)
 
