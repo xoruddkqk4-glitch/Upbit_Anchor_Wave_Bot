@@ -74,6 +74,7 @@ MAX_SLIPPAGE_PCT = (
 UNFILLED_WAIT_SEC = (
     3  # 주문 후 미체결 체결 대기 시간(초) -> 경과 후 미체결 잔량 자동 취소
 )
+TRADING_FEE_RATE = 0.0005  # 업비트 KRW 마켓 거래 수수료 (매수·매도 각 0.05%). 실현손익·순수익률 계산에 차감
 
 # 차트 데이터 조회 설정
 CANDLE_COUNT = 120  # 일봉 데이터 조회 개수 (최소 60~120개 권장)
@@ -100,7 +101,10 @@ ENABLE_SCALE_IN_BUY = True  # 3분할 매수 전략 활성화 여부 (중심가~
 
 # 매도(익절/손절) 전략 파라미터 (대칭이론 및 5일선 복합 연동)
 PREV_HIGH_LOOKBACK_DAYS = (
-    60  # 전고점 매물대 저항 감시 기간 (20일, 60일, 120일 등)
+    20  # 기준봉 판정용 전고점 룩백(일): 종가가 이 기간 고가를 돌파해야 기준봉. 20=현행 동작. scan_ref_candles.py와 동일 값 유지
+)
+SWING_LOW_LOOKBACK_DAYS = (
+    10  # 1차 파동 스윙 저점 탐색 기간(일): 기준봉 직전 N일 내 최저가 -> wave_height·rise_duration 산출. scan_ref_candles.py와 동일 값 유지
 )
 USE_TIME_SYMMETRY_EXIT = True  # 매도 시 기간 대칭 알고리즘 반영 여부[cite: 2]
 TIME_SYMMETRY_TOLERANCE_DAYS = 1  # 기간 대칭 허용 오차 (±1일)
@@ -1281,7 +1285,10 @@ def execute_buy(upbit_client, ticker, amount_krw, fallback_price):
     return {"ok": False, "price": fallback_price, "volume": 0.0, "amount": 0.0}
 
   fill = upbit_client.buy_limit_with_slippage_protection(
-      ticker=ticker, amount_krw=amount_krw
+      ticker=ticker,
+      amount_krw=amount_krw,
+      max_slippage_pct=MAX_SLIPPAGE_PCT,
+      wait_sec=UNFILLED_WAIT_SEC,
   )
   if not fill or not fill.get("ok"):
     print(f"[미체결] {ticker} 매수 체결 수량 0 -> 포지션 상태 변경 생략")
@@ -1300,7 +1307,10 @@ def execute_sell(upbit_client, ticker, volume, fallback_price):
     }
 
   fill = upbit_client.sell_limit_with_slippage_protection(
-      ticker=ticker, volume=volume
+      ticker=ticker,
+      volume=volume,
+      max_slippage_pct=MAX_SLIPPAGE_PCT,
+      wait_sec=UNFILLED_WAIT_SEC,
   )
   if not fill or not fill.get("ok"):
     print(f"[미체결] {ticker} 매도 체결 수량 0 -> 포지션 상태 변경 생략")
@@ -1325,6 +1335,31 @@ def calc_breakout_stop(confirmed_low, entry_price, current_stop):
   return stop, basis
 
 
+def calc_net_pnl(buy_cost, sell_amount):
+  """수수료 차감 실현손익과 순수익률 -> (pnl_krw, return_ratio)
+
+  업비트 KRW 마켓은 매수·매도 각각 체결금액의 TRADING_FEE_RATE를 수수료로 떼므로 둘을 합산 차감한다.
+  수익률은 가격 변동률이 아닌 투입원가 대비 순손익(pnl / buy_cost). 기존에는 수수료가 빠져 시트 PnL이 과대계상됐다.
+  """
+  fee = (buy_cost + sell_amount) * TRADING_FEE_RATE
+  pnl = sell_amount - buy_cost - fee
+  ret = pnl / buy_cost if buy_cost > 0 else 0.0
+  return pnl, ret
+
+
+def find_pullback_low(df, ref_date, fallback_price, fallback_date):
+  """기준봉 이후 ~ 직전 확정봉 구간의 최저가(눌림 저점 L1)와 그 날짜 -> (price, 'YYYY-MM-DD')
+
+  대칭이론상 2차 파동은 눌림 저점에서 시작하므로 파동 기준점은 진입가·진입일이 아닌 L1이어야
+  가격 목표(L1 + wave_height)와 기간 카운트가 정확해진다. 구간이 비면 진입값으로 폴백.
+  """
+  post_ref = df.loc[df.index > pd.Timestamp(ref_date)].iloc[:-1]
+  if post_ref.empty:
+    return fallback_price, fallback_date
+  low_idx = post_ref["low"].idxmin()
+  return float(post_ref.loc[low_idx, "low"]), low_idx.strftime("%Y-%m-%d")
+
+
 def build_partial_fill_note(target_volume, filled_volume):
   """부분 체결 시 알림 메시지에 덧붙일 안내 문구 (완전 체결이면 빈 문자열)"""
   if filled_volume >= target_volume * (1 - FILL_TOLERANCE):
@@ -1345,7 +1380,7 @@ def detect_reference_candles(df):
   df = df.copy()
   df["Vol_MA"] = df["volume"].rolling(window=REF_VOL_MA_PERIOD).mean()
   df["High_Lookback"] = (
-      df["high"].shift(1).rolling(window=REF_VOL_MA_PERIOD).max()
+      df["high"].shift(1).rolling(window=PREV_HIGH_LOOKBACK_DAYS).max()
   )
   df["Change"] = (df["close"] - df["open"]) / df["open"]
   df["MA5"] = df["close"].rolling(window=5).mean()
@@ -1373,6 +1408,7 @@ def new_ticker_state():
       "base_price": None,
       "wave_anchor_price": None,
       "wave_anchor_date": None,
+      "time_sym_below_high_logged": False,
       "ref_high": 0.0,
       "effective_ref_low": 0.0,
       "ref_mid": 0.0,
@@ -1444,7 +1480,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       effective_ref_low = min(ref_low, prev_close) if has_gap_up else ref_low
       ref_mid = effective_ref_low + (ref_high - effective_ref_low) * PULLBACK_RATIO
 
-      lookback_start = max(0, ref_pos - 10)
+      lookback_start = max(0, ref_pos - SWING_LOW_LOOKBACK_DAYS)
       low_rel_pos = df["low"].iloc[lookback_start : ref_pos + 1].argmin()
       rise_duration = (ref_pos - (lookback_start + low_rel_pos)) + 1
       swing_low_price = df["low"].iloc[lookback_start : ref_pos + 1].min()
@@ -1502,12 +1538,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         sell_price = fill["price"]
         sell_amount = fill["amount"]
         buy_cost = state["entry_price"] * sell_vol
-        realized_pnl = sell_amount - buy_cost
-        ret_pct = (
-            (sell_price - state["entry_price"]) / state["entry_price"]
-            if state["entry_price"] > 0
-            else 0.0
-        )
+        realized_pnl, ret_pct = calc_net_pnl(buy_cost, sell_amount)
         fill_note = build_partial_fill_note(target_vol, sell_vol)
 
         signals.append({
@@ -1522,7 +1553,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             f"<b>🔴 [BST 봇] 손절 매도! (STOP LOSS)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>매도가</b>: {format_price(sell_price)}\n"
-            f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b>\n"
+            f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
             f"• <b>사유</b>: 기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 -> 전량 손절 및 상태 초기화"
             f"{fill_note}\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
@@ -1556,13 +1587,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
     open_positions = count_open_positions(global_state)
     can_open_new = open_positions < MAX_OPEN_POSITIONS
 
-    # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 >= prev_ma5) 동시 확인 시 재매수
+    # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 > prev_ma5, 보합 제외) 동시 확인 시 재매수
     if (
         allow_entry
         and can_open_new
         and state["base_price"] is not None
         and curr_close > state["base_price"]
-        and curr_ma5 >= prev_ma5
+        and curr_ma5 > prev_ma5
         and state["remaining_ratio"] == 0
     ):
       fill = execute_buy(upbit_client, ticker, ORDER_AMOUNT_KRW, curr_close)
@@ -1719,8 +1750,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["scale_in_count"] = 1
             state["last_scale_in_date"] = curr_candle_date  # 1일 1회 분할 매수 제한
             state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용, 추가 매수 시 유지)
-            state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
-            state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 추가 매수·재매수 시 유지
+            # 2차 파동 기점 = 기준봉 이후 ~ 어제(확정봉) 구간의 눌림 저점(L1). 이론상 2차 파동은 L1에서 시작하므로
+            # 진입가·진입일 대신 L1 가격·날짜를 기준점으로 삼아 가격 목표(L1 + wave_height)와 기간 카운트를 정밀화
+            anchor_price, anchor_date = find_pullback_low(
+                df, state["active_ref_date"], fill["price"], curr_candle_date
+            )
+            state["wave_anchor_price"] = anchor_price
+            state["wave_anchor_date"] = anchor_date  # 추가 매수·재매수 시 유지
 
             signals.append({
                 "Ticker": ticker,
@@ -1858,10 +1894,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       entry_price = state["entry_price"]
       current_return = (curr_close - entry_price) / entry_price
 
-      # A. 대칭이론 조건 만족 시 보유량의 50% 익절
-      #    1차 파동(스윙 저점 -> 기준봉 고가)의 높이(wave_height)와 기간(rise_duration)을
-      #    2차 파동(진입 이후)에 그대로 투영한다. 둘 중 먼저 도달하는 조건에서 익절하며,
-      #    MIN_TAKE_PROFIT_PCT는 공통 하한(손실 상태에서 시간만 지났다고 팔지 않도록).
+      # A. 대칭이론 익절 (2단계)
+      #    1차 파동(스윙 저점 -> 기준봉 고가)의 높이(wave_height)와 기간(rise_duration)을 2차 파동에 투영한다.
+      #    [1단계] 기간 대칭: 2차 파동에 쓴 시간이 1차와 같아지면 에너지 소진 -> 50% 익절.
+      #            단, '기준봉 고가 위'(2차 상승 국면)에서 창(rise_duration ± 허용오차) 안일 때만.
+      #            고가 아래에서의 기간 대칭은 '조정 완료 -> 상승 기대' 신호라 매도하지 않는다(관찰 기록만).
+      #            창을 지나 늦게 돌파한 경우 기간 대칭은 소멸하고 가격 대칭·5일선이 관리한다(돌파 직후 매도 방지).
+      #    [2단계] 가격 대칭: 목표가(기준점 + wave_height) 도달 시 잔여 전량. 국면 무관.
+      #    MIN_TAKE_PROFIT_PCT는 공통 하한(손실 상태에서 팔지 않도록, 실제 진입가 기준).
       if not state.get("entry_date"):
         # 구버전 상태 파일 호환: 진입일 미기록 포지션은 현재 일봉부터 기간 카운트 시작
         state["entry_date"] = curr_candle_date
@@ -1869,17 +1909,21 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         # 구버전 상태 파일 호환: 파동 기준점 미기록 포지션은 현재 진입값을 기준점으로 사용
         state["wave_anchor_price"] = entry_price
         state["wave_anchor_date"] = state["entry_date"]
-      # 대칭 목표는 포지션 진입가가 아닌 '파동 기준점'(최초 진입) 기준. 재매수로 진입가가 갱신돼도 목표는 고정
+      # 대칭 목표는 포지션 진입가가 아닌 '파동 기준점'(눌림 저점 L1 또는 돌파 진입) 기준. 재매수로 진입가가 갱신돼도 목표는 고정
       days_since_anchor = (
           pd.Timestamp(curr_candle_date) - pd.Timestamp(state["wave_anchor_date"])
       ).days
-      # 허용오차만큼 앞당겨 발동 가능하되, 기준일 당일(0일) 발동은 배제
-      time_target_days = max(rise_duration - TIME_SYMMETRY_TOLERANCE_DAYS, 1)
+      # 기간 대칭 창: [rise_duration - 오차, rise_duration + 오차], 기준일 당일(0일) 발동은 배제
+      time_window_start = max(rise_duration - TIME_SYMMETRY_TOLERANCE_DAYS, 1)
+      time_window_end = rise_duration + TIME_SYMMETRY_TOLERANCE_DAYS
+      in_time_window = time_window_start <= days_since_anchor <= time_window_end
       price_target = state["wave_anchor_price"] + wave_height
 
       is_time_symmetric_exit = (
           USE_TIME_SYMMETRY_EXIT
-          and days_since_anchor >= time_target_days
+          and not state["symmetry_tp_executed"]
+          and in_time_window
+          and curr_close > ref_high
           and current_return >= MIN_TAKE_PROFIT_PCT
       )
       is_price_symmetric_exit = (
@@ -1887,27 +1931,63 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           and curr_close >= price_target
           and current_return >= MIN_TAKE_PROFIT_PCT
       )
+
+      # 고가 아래에서 기간 대칭 창에 진입: 매도 대신 관찰 기록 (파동당 1회). '조정 완료 -> 상승' 가설 검증용 데이터
+      if (
+          USE_TIME_SYMMETRY_EXIT
+          and in_time_window
+          and curr_close <= ref_high
+          and not state.get("time_sym_below_high_logged")
+      ):
+        state["time_sym_below_high_logged"] = True
+        observe_note = (
+            f"기준봉 고가({format_price(ref_high)}) 아래에서 기간 대칭 창 진입 (파동 기점 후 {days_since_anchor}일,"
+            f" 1차 파동 {rise_duration}일) -> 이론상 조정 완료 국면, 매도 없이 관찰"
+        )
+        print(f"[{ticker}] [기간 대칭 관찰] {observe_note}")
+        signals.append({
+            "Ticker": ticker,
+            "Event": "INFO (TIME SYMMETRY BELOW HIGH)",
+            "Price": curr_close,
+            "Reason": observe_note,
+        })
+        SendMessage(
+            f"<b>👀 [BST 봇] 기간 대칭 관찰 (고가 아래)</b>\n"
+            f"• <b>종목</b>: {ticker}\n"
+            f"• <b>현재가</b>: {format_price(curr_close)} (수익률 {current_return * 100:+.2f}%)\n"
+            f"• <b>내용</b>: {observe_note}"
+        )
+
       if is_price_symmetric_exit:
+        # 2단계 우선: 목표가 도달이면 잔여 전량 (1단계 미실행이어도 전량)
+        target_vol = state["total_volume"] * state["remaining_ratio"]
+        stage = "PRICE"
+        event_name = "SELL (PRICE SYMMETRY TARGET)"
         symmetry_reason = (
-            f"가격 대칭 달성: 1차 파동 높이 {format_price(wave_height)} 투영 목표가"
-            f" {format_price(price_target)} 도달"
+            f"가격 대칭 달성: 파동 기점 {format_price(state['wave_anchor_price'])} + 1차 파동 높이"
+            f" {format_price(wave_height)} = 목표가 {format_price(price_target)} 도달 -> 잔여 전량 익절"
         )
       elif is_time_symmetric_exit:
+        held_vol_now = state["total_volume"] * state["remaining_ratio"]
+        target_vol = min(state["total_volume"] * 0.5, held_vol_now)
+        stage = "TIME"
+        event_name = "PARTIAL SELL (TIME SYMMETRY 50%)"
         symmetry_reason = (
-            f"기간 대칭 달성: 1차 파동 {rise_duration}일 대비 파동 기점 후"
-            f" {days_since_anchor}일 경과 (허용오차 ±{TIME_SYMMETRY_TOLERANCE_DAYS}일)"
+            f"기간 대칭 달성: 기준봉 고가 위에서 1차 파동 {rise_duration}일 대비 파동 기점 후"
+            f" {days_since_anchor}일 경과 (창 {time_window_start}~{time_window_end}일) -> 50% 익절"
         )
       else:
+        target_vol = 0.0
+        stage = ""
+        event_name = ""
         symmetry_reason = ""
 
-      if (
-          is_time_symmetric_exit or is_price_symmetric_exit
-      ) and not state["symmetry_tp_executed"]:
-        target_vol = state["total_volume"] * 0.5
+      if target_vol > 0:
         fill = execute_sell(upbit_client, ticker, target_vol, curr_close)
         if fill["ok"]:
-          # 부분 체결이어도 익절 이벤트는 1회로 확정 (재진입 시 초과 매도 방지)
-          state["symmetry_tp_executed"] = True
+          if stage == "TIME":
+            # 부분 체결이어도 1단계는 1회로 확정 (재시도 시 total_volume*0.5를 다시 팔아 초과 매도되는 것 방지)
+            state["symmetry_tp_executed"] = True
           sell_vol = fill["volume"]
           sell_price = fill["price"]
           sell_amount = fill["amount"]
@@ -1916,47 +1996,54 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               max(held_vol - sell_vol, 0.0) / state["total_volume"]
           )
           buy_cost = entry_price * sell_vol
-          realized_pnl = sell_amount - buy_cost
-          realized_return = (
-              (sell_price - entry_price) / entry_price if entry_price > 0 else 0.0
-          )
+          realized_pnl, realized_return = calc_net_pnl(buy_cost, sell_amount)
           fill_note = build_partial_fill_note(target_vol, sell_vol)
+          wave_done_note = (
+              "\n• <b>파동 완료</b>: 포지션 전량 청산. 재매수 없이 새 기준봉 대기 (유효기간 만료 시 초기화)"
+              if stage == "PRICE" and state["remaining_ratio"] <= 0
+              else ""
+          )
 
           signals.append({
               "Ticker": ticker,
-              "Event": "PARTIAL SELL (SYMMETRY 50%)",
+              "Event": event_name,
               "Return(%)": round(realized_return * 100, 2),
-              "Reason": f"{symmetry_reason} -> 50% 익절 완료",
+              "Reason": symmetry_reason,
           })
 
-          # 텔레그램 50% 분할 익절 알림
+          title = (
+              "🟢 [BST 봇] 기간 대칭 50% 익절! (PARTIAL SELL)"
+              if stage == "TIME"
+              else "🎯 [BST 봇] 가격 대칭 목표 도달! 잔여 전량 익절 (TARGET SELL)"
+          )
           SendMessage(
-              f"<b>🟢 [BST 봇] 50% 분할 익절! (PARTIAL SELL)</b>\n"
+              f"<b>{title}</b>\n"
               f"• <b>종목</b>: {ticker}\n"
               f"• <b>매도가</b>: {format_price(sell_price)}\n"
               f"• <b>수익률</b>: <b>{realized_return * 100:+.2f}%</b>\n"
-              f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b>\n"
-              f"• <b>사유</b>: {symmetry_reason} (보유 수량 50% 익절)\n"
+              f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b> (수수료 차감)\n"
+              f"• <b>사유</b>: {symmetry_reason}\n"
               f"• <b>대칭 목표</b>: 가격 {format_price(price_target)} / 기간 {rise_duration}일 (파동 기점 {state['wave_anchor_date']} 후 {days_since_anchor}일 경과)"
-              f"{fill_note}\n"
+              f"{fill_note}{wave_done_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
 
           save_trade_to_google_sheet(
               ticker=ticker,
               trade_type="매도",
-              event_name="PARTIAL SELL (SYMMETRY 50%)",
+              event_name=event_name,
               price=sell_price,
               volume=sell_vol,
               amount_krw=sell_amount,
               entry_price=entry_price,
               realized_pnl_krw=realized_pnl,
               return_pct=realized_return,
-              reason=f"{symmetry_reason} (보유 수량 50% 익절)",
+              reason=symmetry_reason,
           )
 
       # B. 5일선 꺾임(하향 이탈) 체크 -> 잔여 전액 매도 후 기준 가격 기록
-      if curr_ma5 < prev_ma5:
+      #    (가격 대칭 2단계가 같은 틱에 잔여 전량을 청산했으면 수량 0 주문을 내지 않도록 재확인)
+      if curr_ma5 < prev_ma5 and state["remaining_ratio"] > 0:
         target_vol = state["total_volume"] * state["remaining_ratio"]
         fill = execute_sell(upbit_client, ticker, target_vol, curr_close)
         if fill["ok"]:
@@ -1964,10 +2051,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           sell_price = fill["price"]
           sell_amount = fill["amount"]
           buy_cost = entry_price * sell_vol
-          realized_pnl = sell_amount - buy_cost
-          ret_pct = (
-              (sell_price - entry_price) / entry_price if entry_price > 0 else 0.0
-          )
+          realized_pnl, ret_pct = calc_net_pnl(buy_cost, sell_amount)
           fill_note = build_partial_fill_note(target_vol, sell_vol)
 
           state["remaining_ratio"] = (
@@ -1992,7 +2076,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f"• <b>종목</b>: {ticker}\n"
               f"• <b>매도가</b>: {format_price(sell_price)}\n"
               f"• <b>수익률</b>: <b>{ret_pct * 100:+.2f}%</b>\n"
-              f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b>\n"
+              f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b> (수수료 차감)\n"
               f"• <b>사유</b>: 5일선 하향 꺾임 -> 잔여 전액 매도 (기준가 {format_price(sell_price)} 기록)"
               f"{fill_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
@@ -2137,6 +2221,8 @@ def _run_market_scan_locked():
           all_signals.extend(signals)
       time.sleep(API_DELAY_SEC)
     except Exception as e:
+      # 종목 단위 오류는 다른 종목 처리를 막지 않되 반드시 남긴다 (과거 NameError 오타가 여기서 삼켜져 장기간 묻혔음)
+      print(f"[오류] {ticker} 처리 중 예외 -> 건너뜀: {type(e).__name__}: {e}")
       continue
 
   save_state(global_state)

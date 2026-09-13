@@ -28,6 +28,8 @@ REF_VOL_MULTIPLIER = 2.0    # 거래량 급증 배수 (200% 이상)
 REF_MIN_CHANGE_PCT = 0.10   # 기준봉 최소 상승률 (10% 이상 장대양봉)
 PULLBACK_RATIO = 0.5        # 눌림목 기준 비율 (0.5 = 중심가)
 REF_EXPIRY_DAYS = 20        # 기준봉 유효기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 만료<->재등록 순환 발생)
+PREV_HIGH_LOOKBACK_DAYS = 20  # 기준봉 판정용 전고점 룩백(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 봇·스캐너가 다른 기준봉 탐지)
+SWING_LOW_LOOKBACK_DAYS = 10  # 1차 파동 스윙 저점 탐색 기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지
 MAX_TARGET_COUNT = 20       # 스캔 대상 최대 코인 수
 API_DELAY_SEC = 0.1         # API 요청 간격
 
@@ -243,7 +245,7 @@ def detect_reference_candles(df):
     df = df.copy()
     df["Vol_MA"] = df["volume"].rolling(window=REF_VOL_MA_PERIOD).mean()
     df["High_Lookback"] = (
-        df["high"].shift(1).rolling(window=REF_VOL_MA_PERIOD).max()
+        df["high"].shift(1).rolling(window=PREV_HIGH_LOOKBACK_DAYS).max()
     )
     df["Change"] = (df["close"] - df["open"]) / df["open"]
 
@@ -359,7 +361,7 @@ def _scan_all_reference_candles_locked():
                 effective_ref_low = min(ref_low, prev_close) if has_gap_up else ref_low
                 ref_mid = effective_ref_low + (ref_high - effective_ref_low) * PULLBACK_RATIO
 
-                lookback_start = max(0, ref_pos - 10)
+                lookback_start = max(0, ref_pos - SWING_LOW_LOOKBACK_DAYS)
                 low_rel_pos = df["low"].iloc[lookback_start : ref_pos + 1].argmin()
                 rise_duration = (ref_pos - (lookback_start + low_rel_pos)) + 1
                 swing_low_price = float(df["low"].iloc[lookback_start : ref_pos + 1].min())
