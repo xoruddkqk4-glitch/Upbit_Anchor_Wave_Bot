@@ -335,7 +335,7 @@
   - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
-## 📝 [2026-09-13 22:40] 업데이트 이력 (Commit ID: pending)
+## 📝 [2026-09-13 22:40] 업데이트 이력 (Commit ID: 3959c44)
 - **수정 내용**:
   1. **[Step 2] 손절폭 기반 변동성 가중 사이징 (Risk Parity) 구현 (`Upbit_Anchor_Wave_Bot.py`)**:
      - 1회 손절 시 감내할 최대 손실금(`MAX_LOSS_PER_TRADE_KRW = 30000원`)을 기준으로 진입가-손절가 이격률을 역산하여 종목별 총 배정 금액을 계산하는 `calc_position_size()` 도입
