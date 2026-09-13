@@ -353,4 +353,17 @@
   - **엔드투엔드 진입 검증 완료**: 알트코인 기준봉 눌림목 1차 분할 매수 연동 정상 검증
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-13 22:52] 업데이트 이력 (Commit ID: ac906be)
+- **수정 내용**:
+  1. **총 운용자산 400만원 / 20개 감시 종목 기준 자금 배분 최적화 (B안 적용, `Upbit_Anchor_Wave_Bot.py`)**:
+     - `MAX_OPEN_POSITIONS = 20`: 동시 보유 종목 수 상한을 기존 5개에서 20개로 확대하여, 20개 감시 종목에 대해 포지션 제한 없이 전 종목 진입 허용
+     - `MAX_BUY_AMOUNT_KRW = 300000`: 종목당 최대 매수 실행 한도를 기존 100만원에서 30만원으로 조정 (자금 회전율 극대화 및 포트폴리오 유연성 확보)
+     - `ORDER_AMOUNT_KRW = MAX_BUY_AMOUNT_KRW`: 종목당 총 매수 실행 금액 자동 연동
+     - `MAX_LOSS_PER_TRADE_KRW = 25000`: 1회 손절 시 허용 최대 손실금을 3만원에서 2.5만원으로 조정 (총 자산 400만원 대비 약 0.625% 리스크 제어)
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **런타임 동작 검증**: `calc_position_size(1000, 900)` 테스트 시 10% 손절폭 기준 250,000원 배정, 5% 손절폭 기준 300,000원 상한 클리핑 정상 확인
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+
 
