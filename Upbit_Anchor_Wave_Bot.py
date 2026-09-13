@@ -1259,6 +1259,75 @@ class UpbitClient:
     # 취소 반영 후 실제 체결분만 집계 (부분 체결 포함)
     return self._summarize_fill(order_uuid, limit_price)
 
+  def buy_market(self, ticker, amount_krw):
+    """원화 기준 시장가 매수 주문 (ord_type='price')"""
+    if not self.access_key or not self.secret_key:
+      print(f"[알림] API Key 미설정으로 {ticker} 시장가 매수 생략 (금액: {amount_krw:,}원)")
+      return None
+
+    url = f"{self.server_url}/orders"
+    params = {
+        "market": ticker,
+        "side": "bid",
+        "price": str(int(amount_krw)),
+        "ord_type": "price",
+    }
+    res = requests.post(
+        url, json=params, headers=self._get_headers(params), timeout=5
+    ).json()
+    order_uuid = res.get("uuid")
+    print(f"[시장가 매수 주문] {ticker} | 금액: {amount_krw:,}원 | UUID: {order_uuid}")
+
+    if not order_uuid:
+      self._alert_order_rejected(ticker, params["side"], res)
+      return self._summarize_fill(None, 0.0)
+
+    time.sleep(1.0)
+    return self._summarize_fill(order_uuid, 0.0)
+
+  def sell_market(self, ticker, volume, fallback_price=0.0):
+    """수량 기준 시장가 매도 주문 (ord_type='market')"""
+    if not self.access_key or not self.secret_key:
+      print(f"[알림] API Key 미설정으로 {ticker} 시장가 매도 생략 (수량: {volume})")
+      return None
+
+    vol_str = f"{volume:.8f}".rstrip("0").rstrip(".")
+    url = f"{self.server_url}/orders"
+    params = {
+        "market": ticker,
+        "side": "ask",
+        "volume": vol_str,
+        "ord_type": "market",
+    }
+    res = requests.post(
+        url, json=params, headers=self._get_headers(params), timeout=5
+    ).json()
+    order_uuid = res.get("uuid")
+    print(f"[시장가 매도 주문] {ticker} | 수량: {vol_str} | UUID: {order_uuid}")
+
+    if not order_uuid:
+      self._alert_order_rejected(ticker, params["side"], res)
+      return self._summarize_fill(None, fallback_price)
+
+    time.sleep(1.0)
+    return self._summarize_fill(order_uuid, fallback_price)
+
+  def get_coin_balance(self, ticker):
+    """특정 코인의 주문 가능 + 묶인 전체 보유 수량 (balance + locked) 조회"""
+    coin_symbol = ticker.replace("KRW-", "") if ticker.startswith("KRW-") else ticker
+    try:
+      balances = self.get_balances()
+      for b in balances:
+        if b.get("currency") == coin_symbol:
+          balance = float(b.get("balance", 0.0) or 0.0)
+          locked = float(b.get("locked", 0.0) or 0.0)
+          return balance + locked
+      return 0.0
+    except Exception as e:
+      print(f"[경고] {ticker} 잔고 조회 실패: {e}")
+      return 0.0
+
+
 
 # 한 실행(5분 주기) 안에서 여러 종목이 잔고 부족에 동시에 걸려도 텔레그램 알림은 1회만 (크론 실행마다 초기화)
 _balance_alert_sent_this_run = False
@@ -1301,8 +1370,53 @@ def execute_buy(upbit_client, ticker, amount_krw, fallback_price):
   return fill
 
 
-def execute_sell(upbit_client, ticker, volume, fallback_price):
-  """매도 집행 후 실제 체결 결과 반환 (모의/스캔 모드면 이론 체결값)"""
+def cleanup_small_amount_and_sell(upbit_client, ticker, target_vol, fallback_price):
+  """5,000원 미만 소량 잔여 코인 정리 (CleanupSmallAmount)
+
+  1. 10,000원 시장가 추가 매수 (업비트 최소 주문 5,000원 상회)
+  2. 1초 대기 후 계좌 내 해당 코인의 전체 보유 수량 조회
+  3. 전체 수량 전량 시장가 매도
+  4. 원래 잔여 포지션(target_vol)에 해당하는 체결 결과 반환
+  """
+  cleanup_buy_amount = 10000
+  print(f"[소량정리] {ticker} 1단계: {cleanup_buy_amount:,}원 시장가 추가 매수 진행")
+  buy_fill = upbit_client.buy_market(ticker, cleanup_buy_amount)
+  if not buy_fill or not buy_fill.get("ok"):
+    print(f"[소량정리 실패] {ticker} 10,000원 추가 매수 실패 -> 다음 주기 재시도")
+    return {"ok": False, "price": fallback_price, "volume": 0.0, "amount": 0.0}
+
+  time.sleep(1.0)
+  # 2단계: 계좌의 실제 코인 전체 잔고 조회
+  actual_qty = upbit_client.get_coin_balance(ticker)
+  sell_qty = actual_qty if actual_qty > 0 else (target_vol + buy_fill["volume"])
+
+  print(f"[소량정리] {ticker} 2단계: 전량 시장가 매도 진행 (수량: {sell_qty})")
+  sell_fill = upbit_client.sell_market(ticker, sell_qty, fallback_price)
+  if not sell_fill or not sell_fill.get("ok"):
+    print(f"[소량정리 실패] {ticker} 전량 매도 실패 -> 다음 주기 재시도")
+    return {"ok": False, "price": fallback_price, "volume": 0.0, "amount": 0.0}
+
+  realized_price = sell_fill["price"] if sell_fill.get("price", 0) > 0 else fallback_price
+  print(
+      f"[소량정리 완료] {ticker}: 매도 체결가 {realized_price:,}원 |"
+      f" 포지션 잔여 {target_vol} 전량 청산 완료"
+  )
+  return {
+      "ok": True,
+      "price": realized_price,
+      "volume": target_vol,
+      "amount": realized_price * target_vol,
+      "uuid": sell_fill.get("uuid"),
+  }
+
+
+def execute_sell(upbit_client, ticker, volume, fallback_price, is_stop_loss=False):
+  """매도 집행 후 실제 체결 결과 반환 (모의/스캔 모드면 이론 체결값)
+
+  - 5,000원 미만 소액 매도: 10,000원 시장가 추가 매수 후 전량 시장가 매도 (CleanupSmallAmount)
+  - 손절 매도(is_stop_loss=True): 슬리피지 지정가가 아닌 시장가 매도(ord_type='market')로 즉시 체결
+  - 일반 매도(대칭 익절, 5일선 매도): 슬리피지 제어형 지정가 매도(sell_limit_with_slippage_protection)
+  """
   if not (AUTO_TRADE_EXECUTE and upbit_client and upbit_client.access_key):
     return {
         "ok": True,
@@ -1311,6 +1425,25 @@ def execute_sell(upbit_client, ticker, volume, fallback_price):
         "amount": fallback_price * volume,
     }
 
+  # 1. 5,000원 미만 소액 잔여량 정리 (CleanupSmallAmount)
+  est_sell_amount = volume * fallback_price
+  if est_sell_amount < MIN_BUY_AMOUNT_KRW:
+    print(
+        f"[소량정리] {ticker} 매도 평가액 {est_sell_amount:,.0f}원 < {MIN_BUY_AMOUNT_KRW:,}원 ->"
+        " 10,000원 시장가 추가 매수 후 전량 매도 집행"
+    )
+    return cleanup_small_amount_and_sell(upbit_client, ticker, volume, fallback_price)
+
+  # 2. 손절 매도: 시장가 매도로 즉시 전량 체결 (급락장 슬리피지 락 방지)
+  if is_stop_loss:
+    print(f"[손절 매도 집행] {ticker} 손절 신호 -> 시장가 매도(ord_type='market') 즉시 전량 실행")
+    fill = upbit_client.sell_market(ticker, volume, fallback_price)
+    if not fill or not fill.get("ok"):
+      print(f"[손절 실패] {ticker} 시장가 매도 체결 실패 -> 다음 틱 재시도")
+      return {"ok": False, "price": fallback_price, "volume": 0.0, "amount": 0.0}
+    return fill
+
+  # 3. 일반 매도 (대칭 익절, 5일선 매도): 슬리피지 제어형 지정가 매도
   fill = upbit_client.sell_limit_with_slippage_protection(
       ticker=ticker,
       volume=volume,
@@ -1558,7 +1691,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
     if curr_close < effective_ref_low:
       if state["remaining_ratio"] > 0 and state["entry_bought"]:
         target_vol = state["total_volume"] * state["remaining_ratio"]
-        fill = execute_sell(upbit_client, ticker, target_vol, curr_close)
+        fill = execute_sell(
+            upbit_client, ticker, target_vol, curr_close, is_stop_loss=True
+        )
         if not fill["ok"]:
           # 체결 0 -> 포지션을 그대로 유지한 채 다음 주기에 손절 재시도
           return signals
@@ -1574,18 +1709,18 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             "Ticker": ticker,
             "Event": "SELL (STOP LOSS)",
             "Price": sell_price,
-            "Reason": "기준봉 손절가(마진노선) 이탈 -> 기준 가격 데이터 초기화",
+            "Reason": "기준봉 손절가(마진노선) 이탈 -> 시장가 전량 손절 및 데이터 초기화",
         })
 
         # 텔레그램 손절 매도 알림
         SendMessage(
-            f"<b>🔴 [BST 봇] 손절 매도! (STOP LOSS)</b>\n"
+            f"<b>🔴 [BST 봇] 시장가 손절 매도! (STOP LOSS)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>매도가</b>: {format_price(sell_price)}\n"
             f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
-            f"• <b>사유</b>: 기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 -> 전량 손절 및 상태 초기화"
+            f"• <b>사유</b>: 기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 -> 시장가 즉시 전량 손절"
             f"{fill_note}\n"
-            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+            f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 
         save_trade_to_google_sheet(

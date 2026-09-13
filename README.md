@@ -365,5 +365,22 @@
   - **런타임 동작 검증**: `calc_position_size(1000, 900)` 테스트 시 10% 손절폭 기준 250,000원 배정, 5% 손절폭 기준 300,000원 상한 클리핑 정상 확인
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-13 23:00] 업데이트 이력 (Commit ID: 3a6caae)
+- **수정 내용** (실전 체결 안정성 고도화, 파일: `Upbit_Anchor_Wave_Bot.py`):
+  1. **손절(STOP LOSS) 시장가 매도(`ord_type='market'`) 전환**:
+     - `UpbitClient.sell_market(ticker, volume)` 신설: 업비트 REST API 시장가 수량 매도 주문 지원
+     - 기준봉 저가 이탈 손절 시 기존 슬리피지 지정가(3초 대기) 대신 시장가 매도(`is_stop_loss=True`)를 즉시 집행하여, 급락장에서의 미체결 취소 및 손절 지연(슬리피지 락) 위험을 원천 방어
+     - 일반 익절 매도(대칭 익절, 5일선 매도)는 기존의 0.5% 슬리피지 제어형 지정가 매도 방식 유지
+  2. **5,000원 미만 소액 잔여 코인(Dust) 자동 정리 메커니즘 탑재 (`cleanup_small_amount_and_sell`)**:
+     - `UpbitClient.buy_market(ticker, amount_krw)` 및 `get_coin_balance(ticker)` 신설
+     - 대칭 익절 등으로 남은 잔여 수량의 매도 평가액이 업비트 최소 주문 금액(5,000원) 미만일 경우, 업비트 `under_min_total_ask` 거절을 방지하기 위해 **10,000원 시장가 추가 매수 후 계좌 내 전체 잔고를 전량 시장가 매도**하는 2단계 클린업 자동 집행
+     - 원래 포지션 잔여량 기준으로 실현손익 및 수량을 정상 집계하여 봇 상태 머신과 계좌 잔고를 깔끔하게 일치화
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **단위 테스트 4종 전원 통과**: 모의 모드 안전성 / 손절 매도 시 `sell_market` 호출 / 일반 매도 시 `sell_limit_with_slippage_protection` 호출 / 3,000원 소액 평가액 시 10,000원 매수 후 전량 매도 및 잔여 포지션 정상 정산
+  - **엔드투엔드 통합 테스트 통과**: `process_ticker_strategy` 손절가 이탈 시 시장가 매도 발동 및 포지션 초기화 확인
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+
 
 
