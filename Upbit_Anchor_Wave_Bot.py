@@ -16,6 +16,9 @@ from telegram_alert import SendMessage
 # 프로젝트 경로의 .env 명시적 로드
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
+# 한국 표준시(KST, UTC+9) 타임존 정의 (서버 OS 기본 타임존이 UTC여도 항상 정확한 서울 시간 보장)
+KST = datetime.timezone(datetime.timedelta(hours=9))
+
 # ==============================================================================
 # [1. 사용자 설정 및 옵션 파라미터 (Top Options)]
 # ==============================================================================
@@ -61,7 +64,12 @@ TARGET_TICKERS = [
     "KRW-QTUM",
     "KRW-SHIB",
     "KRW-PEPE",
-]
+]  # 지정된 20개 감시 코인 목록 (빈 리스트 [] 지정 시 bot_state.json 내 활성 종목 자동 감시)
+
+# .env 환경변수 TARGET_TICKERS가 설정되어 있으면 우선 적용 (예: TARGET_TICKERS=KRW-BTC,KRW-ETH 또는 빈 문자열)
+env_targets = os.getenv("TARGET_TICKERS")
+if env_targets is not None:
+  TARGET_TICKERS = [t.strip() for t in env_targets.split(",") if t.strip()]
 MAX_TARGET_COUNT = 20  # 감시할 최대 코인 개수 (20개)
 
 # 감시 및 매매 제외 종목 설정 (예: ['KRW-USDT', 'KRW-USDC'] 등 제외할 코인 지정)
@@ -756,7 +764,7 @@ def ensure_pnl_combo_chart(doc, ws_trend, ws_chart):
 def update_daily_portfolio_snapshot(doc, ws_trades, ws_trend, upbit_client=None):
   """'날짜별 포트폴리오 추이' 시트에 오늘자 잔고 및 일일/누적 손익 업데이트"""
   try:
-    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    today_str = datetime.datetime.now(KST).strftime("%Y-%m-%d")
 
     # 1. 체결기록에서 오늘 일일 실현손익 합산
     all_trades = ws_trades.get_all_values()
@@ -878,7 +886,7 @@ def save_trade_to_google_sheet(
 
     ws_trades, ws_trend, ws_chart = get_or_create_worksheets(doc)
 
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(KST)
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     pnl_val = round(realized_pnl_krw) if trade_type == "매도" else 0
@@ -2370,7 +2378,7 @@ def select_monitor_tickers(global_state, combined_exclude):
       and st.get("remaining_ratio", 0) > 0
       and t in combined_exclude
   ]
-  if TARGET_TICKERS:
+  if TARGET_TICKERS and len(TARGET_TICKERS) > 0:
     base = [t for t in TARGET_TICKERS if t not in combined_exclude]
   else:
     base = [
@@ -2417,7 +2425,7 @@ def _run_market_scan_locked():
   # 09:07 스캐너에 의해 기준봉이 포착되었거나(active_ref_date 존재) 매수 포지션이 존재하는 종목 중 제외 코인 빼고 선별
   tickers, held_excluded = select_monitor_tickers(global_state, combined_exclude)
 
-  now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  now_str = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
   print("\n" + "=" * 80)
   print(
       f" [모니터링] [{now_str}] BST 5분 주기 크론탭 모니터링 (09:07 포착 기준봉 감시 종목:"

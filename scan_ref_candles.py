@@ -18,6 +18,9 @@ from state_lock import StateFileLock
 # 프로젝트 경로의 .env 명시적 로드
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
+# 한국 표준시(KST, UTC+9) 타임존 정의 (서버 OS 기본 타임존이 UTC여도 항상 정확한 서울 시간 보장)
+KST = datetime.timezone(datetime.timedelta(hours=9))
+
 # 상태 저장용 JSON 파일 경로 (Upbit_Anchor_Wave_Bot.py와 공유)
 STATE_FILE = "bot_state.json"
 
@@ -64,7 +67,12 @@ TARGET_TICKERS = [
     "KRW-QTUM",
     "KRW-SHIB",
     "KRW-PEPE",
-]  # 지정된 20개 감시 코인 목록
+]  # 지정된 20개 감시 코인 목록 (빈 리스트 [] 지정 시 전일 거래대금 상위 20개 자동 탐색)
+
+# .env 환경변수 TARGET_TICKERS가 설정되어 있으면 우선 적용 (예: TARGET_TICKERS=KRW-BTC,KRW-ETH 또는 빈 문자열)
+env_targets = os.getenv("TARGET_TICKERS")
+if env_targets is not None:
+    TARGET_TICKERS = [t.strip() for t in env_targets.split(",") if t.strip()]
 
 
 def format_price(price: float, show_unit: bool = True) -> str:
@@ -280,46 +288,39 @@ def scan_all_reference_candles():
 
 def _scan_all_reference_candles_locked():
     """매일 09:07 KST 실행: 업비트 종목별 기준봉 탐색 후 bot_state.json 갱신 및 텔레그램 일괄 발송"""
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 80)
     print(f" [스캔] [{now_str}] 매일 09:07 KST 기준봉(Reference Candle) 전용 스캐너 실행")
     print("=" * 80)
 
     global_state = load_state()
 
-    # TARGET_TICKERS가 지정되어 있지 않으면 24시간 거래대금 기준 상위 코인 추출
-    if TARGET_TICKERS:
+    # TARGET_TICKERS가 1개라도 지정되어 있으면 해당 감시 대상 종목만 스캔 (거래대금 상위 20개 조건 미적용)
+    # 감시 대상 종목을 입력하지 않았을 때(빈 리스트 [])만 전일 일봉 거래대금 상위 20개 코인을 자동 추출
+    if TARGET_TICKERS and len(TARGET_TICKERS) > 0:
         target_tickers = [t for t in TARGET_TICKERS if t not in EXCLUDE_TICKERS]
     else:
-        target_tickers = get_top_trading_volume_tickers(
+        top_volume_tickers = get_top_trading_volume_tickers(
             MAX_TARGET_COUNT, EXCLUDE_TICKERS
         )
+        existing_active = [
+            t
+            for t, st in global_state.items()
+            if (st.get("active_ref_date") or st.get("entry_bought", False))
+            and t not in EXCLUDE_TICKERS
+        ]
+        target_tickers = list(dict.fromkeys(top_volume_tickers + existing_active))
 
     detected_count = 0
     all_reported_candles = []
 
     for ticker in target_tickers:
         try:
-            # 이미 매수 포지션 보유 중인 코인은 스캔 건너뛰기(Skip)
-            if ticker in global_state:
-                state = global_state[ticker]
-                if state.get("entry_bought", False):
-                    print(f"  [패스] {ticker} -> 현재 매수 포지션 보유 중 (스캔 건너뜀)")
-                    continue
-
             df = get_daily_ohlcv(ticker, count=CANDLE_COUNT)
             if df is None or len(df) < 30:
                 continue
 
-            df = detect_reference_candles(df)
-            # 마감 확정봉만 탐지(진행 중 마지막 봉 제외) + 유효기간(REF_EXPIRY_DAYS) 내 기준봉만 후보로 인정
-            closed_df = df.iloc[:-1]
-            latest_date = df.index[-1]
-            ref_indices = [
-                idx
-                for idx in closed_df.index[closed_df["Is_Ref_Candle"]].tolist()
-                if (latest_date - idx).days < REF_EXPIRY_DAYS
-            ]
+            curr_close = float(df.iloc[-1]["close"])
 
             if ticker not in global_state:
                 global_state[ticker] = {
@@ -339,7 +340,42 @@ def _scan_all_reference_candles_locked():
                 }
 
             state = global_state[ticker]
-            curr_close = float(df.iloc[-1]["close"])
+
+            # 2. 이미 매수 포지션 보유 중이거나 5일선 매도 후 재매수 대기 중인 코인은
+            # 기존 활성 기준봉 상태를 유지하며 09:07 보고서에 정상 포함 (스캔 건너뛰기 대신 보고)
+            if state.get("entry_bought", False):
+                tag = "보유 중" if state.get("remaining_ratio", 0) > 0 else "재매수 대기"
+                ref_date_str = state.get("active_ref_date") or "미지정"
+                ref_high = state.get("ref_high", 0.0)
+                ref_mid = state.get("ref_mid", 0.0)
+                effective_ref_low = state.get("effective_ref_low", 0.0)
+
+                print(
+                    f"  [{tag}] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
+                    f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
+                )
+
+                all_reported_candles.append({
+                    "ticker": ticker,
+                    "ref_date": ref_date_str,
+                    "tag": tag,
+                    "curr_close": curr_close,
+                    "ref_high": ref_high,
+                    "ref_mid": ref_mid,
+                    "effective_ref_low": effective_ref_low,
+                })
+                time.sleep(API_DELAY_SEC)
+                continue
+
+            df = detect_reference_candles(df)
+            # 마감 확정봉만 탐지(진행 중 마지막 봉 제외) + 유효기간(REF_EXPIRY_DAYS) 내 기준봉만 후보로 인정
+            closed_df = df.iloc[:-1]
+            latest_date = df.index[-1]
+            ref_indices = [
+                idx
+                for idx in closed_df.index[closed_df["Is_Ref_Candle"]].tolist()
+                if (latest_date - idx).days < REF_EXPIRY_DAYS
+            ]
 
             if ref_indices:
                 latest_ref_idx = ref_indices[-1]
@@ -464,15 +500,15 @@ def _scan_all_reference_candles_locked():
     save_state(global_state)
 
     # 텔레그램 일괄(단일) 메시지 발송
-    now_kst = datetime.datetime.now().strftime("%Y-%m-%d %H:%M KST")
+    now_kst = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     if all_reported_candles:
         new_count = sum(1 for c in all_reported_candles if c["tag"] in ["신규 포착", "최신 갱신"])
-        keep_count = sum(1 for c in all_reported_candles if c["tag"] == "감시 중")
+        keep_count = sum(1 for c in all_reported_candles if c["tag"] in ["감시 중", "보유 중", "재매수 대기"])
 
         header_text = (
             "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>\n"
             f"• <b>스캔 일시</b>: {now_kst}\n"
-            f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b> (신규/갱신: {new_count}개 | 감시 중: {keep_count}개)\n"
+            f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b> (신규/갱신: {new_count}개 | 감시/보유 중: {keep_count}개)\n"
             "----------------------------------------"
         )
 
