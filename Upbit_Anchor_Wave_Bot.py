@@ -1746,347 +1746,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       global_state[ticker] = new_ticker_state()
       return signals
 
-    target_scale_in_steps = 3 if ENABLE_SCALE_IN_BUY else 1
-    # 동시 보유 상한: 실제 보유 수량이 있는 종목 수 기준. 현재 종목은 신규 진입/재매수 경로에서는 미보유이므로 중복 계산 없음
-    open_positions = count_open_positions(global_state)
-    can_open_new = open_positions < MAX_OPEN_POSITIONS
-
-    # [재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 > prev_ma5, 보합 제외) 동시 확인 시 재매수
-    if (
-        allow_entry
-        and can_open_new
-        and state["base_price"] is not None
-        and curr_close > state["base_price"]
-        and curr_ma5 > prev_ma5
-        and state["remaining_ratio"] == 0
-    ):
-      # 재매수 금액 = 직전 5일선 매도 금액(base_amount). 대칭 익절로 잔여가 25%만 남은 채 매도됐다면
-      # 재매수도 그만큼만 하여, 매도 직전보다 포지션이 커지는 것을 방지 (구버전 상태는 100만원으로 폴백)
-      re_entry_amount = state.get("base_amount") or ORDER_AMOUNT_KRW
-      fill = execute_buy(upbit_client, ticker, re_entry_amount, curr_close)
-      # 체결 0이면 기준가(base_price)를 유지해 다음 주기에 재매수 재시도
-      if fill["ok"]:
-        entry_price = fill["price"]
-        total_volume = fill["volume"]
-        state["entry_bought"] = True
-        state["entry_price"] = entry_price
-        state["total_volume"] = total_volume
-        state["remaining_ratio"] = 1.0
-        state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
-        # 파동 기준점(wave_anchor_*)과 대칭 익절 플래그(symmetry_tp_executed)는 '파동' 단위 상태라 재매수로 갱신하지 않는다.
-        # 재매수는 항상 이전 매도가보다 높게 되사므로, 기준점을 진입가로 옮기면 대칭 목표가 매번 위로 도망가
-        # 원래 파동의 목표에 결코 도달하지 못한다. 구버전 상태(기준점 미기록)만 현재 진입값으로 백필.
-        if not state.get("wave_anchor_price"):
-          state["wave_anchor_price"] = entry_price
-          state["wave_anchor_date"] = curr_candle_date
-        # 재매수 금액과 무관하게 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
-        # (재매수 후 눌림목 조건에 다시 걸려 추가 분할 매수가 겹치는 과매수 경로 차단. 이후는 매도 로직만 동작)
-        state["scale_in_count"] = target_scale_in_steps
-        triggered_base_price = state["base_price"]
-        triggered_base_date = state.get("base_price_date")
-        state["base_price"] = None
-        state["base_amount"] = None
-        state["base_price_date"] = None
-
-        # 왕복 비용 로깅 (현재가 기준 판정을 유지하기로 한 결정에 따른 실측 데이터 수집용, 매매 제한 없음).
-        # 재매수가가 매도가보다 높은 만큼이 이번 왕복의 실질 비용(수수료·슬리피지 제외, 가격차만).
-        round_trip_pct = (
-            (entry_price - triggered_base_price) / triggered_base_price
-            if triggered_base_price > 0
-            else 0.0
-        )
-        round_trip_note = f"매도가 대비 {round_trip_pct * 100:+.2f}%에 재매수"
-        if triggered_base_date:
-          days_in_limbo = (
-              pd.Timestamp(curr_candle_date) - pd.Timestamp(triggered_base_date)
-          ).days
-          round_trip_note += f" ({triggered_base_date} 매도 후 {days_in_limbo}일 만)"
-
-        signals.append({
-            "Ticker": ticker,
-            "Event": "BUY (RE-ENTRY)",
-            "Strategy": (
-                f"기준가({triggered_base_price}) 현재가 상향 돌파 & 5일선 상승 전환"
-                f" -> 매도 금액과 동일하게 재매수 ({fill['amount']:,.0f}원) | {round_trip_note}"
-            ),
-            "Entry_Price": round(entry_price, 2),
-        })
-
-        # 텔레그램 재매수 알림
-        SendMessage(
-            f"<b>🚀 [BST 봇] 재매수 시그널 발생! (RE-ENTRY)</b>\n"
-            f"• <b>종목</b>: {ticker}\n"
-            f"• <b>전략</b>: 이전 매도 기준가({format_price(triggered_base_price)}) 현재가 상향 돌파 + 5일선 상승 전환 확인\n"
-            f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
-            f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)\n"
-            f"• <b>왕복 비용</b>: {round_trip_note}\n"
-            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
-        )
-
-        save_trade_to_google_sheet(
-            ticker=ticker,
-            trade_type="매수",
-            event_name="BUY (RE-ENTRY)",
-            price=entry_price,
-            volume=total_volume,
-            amount_krw=fill["amount"],
-            entry_price=entry_price,
-            return_pct=round_trip_pct,
-            reason=(
-                f"이전 매도 기준가({format_price(triggered_base_price)}) 상향 돌파"
-                f" & 5일선 상승 전환 재매수 (매도 금액과 동일) | {round_trip_note}"
-            ),
-        )
-
-    # [진입 및 매수 체크] (allow_entry=False면 매도 감시만 수행하므로 전체 건너뜀)
-    if allow_entry and (
-        not state["entry_bought"]
-        or (
-            ENABLE_SCALE_IN_BUY
-            and state["scale_in_count"] < target_scale_in_steps
-            and state["remaining_ratio"] > 0
-        )
-    ):
-      is_pullback = False
-      if ENABLE_PULLBACK_ENTRY:
-        # 마감 확정일봉(09:00 마감) 기준: 중심가 이하 저가 터치 후 확실한 양봉 마감 시 매수
-        price_cond = confirmed_low <= ref_mid
-        rebound_cond = (
-            (confirmed_close > confirmed_open) if REQUIRE_BULLISH_REBOUND else True
-        )
-        # 확정봉이 기준봉 자신이면(기준일 다음 날) 저가<=중심가·양봉 조건이 항상 성립하므로,
-        # 기준봉 '이후'에 마감한 봉만 눌림목 후보로 인정한다 (기준일 당일 자기 일치 차단)
-        after_ref_cond = confirmed_candle_date > state["active_ref_date"]
-        is_pullback = price_cond and rebound_cond and after_ref_cond
-
-      # 눌림목 조건은 마감 확정일봉 기준이라 하루 종일 값이 고정된다.
-      # 가드가 없으면 5분 주기마다 재평가되어 같은 날 3회차까지 연속 체결되므로,
-      # 분할 매수는 일봉 기준일당 1회로 제한한다 (체결 성공 시에만 날짜 기록).
-      can_scale_in_today = state.get("last_scale_in_date") != curr_candle_date
-
-      is_breakout = False
-      if ENABLE_BREAKOUT_ENTRY:
-        # 마감 확정일봉(09:00 마감) 종가가 기준봉 고가를 완벽히 상향 돌파하며 마감 시 매수 (장중 윗꼬리 휩소 차단)
-        # + 현재가도 고가 위에 있어야 함: 어제 돌파했어도 오늘 갭하락으로 반납했으면 이미 실패한 돌파이며,
-        #   진입가가 새 손절선 아래에 놓여 매수 직후 손절되는 경로를 차단
-        is_breakout = confirmed_close > ref_high and curr_close > ref_high
-
-      # A. 신규 진입 (포지션 미보유 상태) - 동시 보유 상한 도달 시 신규 진입 생략
-      if not state["entry_bought"] and not can_open_new and (is_breakout or is_pullback):
-        print(
-            f"[{ticker}] [보유 상한] 진입 신호 있으나 동시 보유 {open_positions}/{MAX_OPEN_POSITIONS}"
-            " 도달 -> 신규 진입 생략"
-        )
-      if not state["entry_bought"] and can_open_new:
-        if is_breakout:
-          # 1) 돌파 매매: 손절선(직전 확정봉 저가, 상한 적용) 기반 변동성 사이징 산출 후 전액 매수
-          prev_low = state["effective_ref_low"]
-          expected_stop, _ = calc_breakout_stop(
-              confirmed_low, curr_close, prev_low
-          )
-          target_amount = calc_position_size(curr_close, expected_stop)
-          fill = execute_buy(upbit_client, ticker, target_amount, curr_close)
-          if fill["ok"]:
-            state["entry_bought"] = True
-            state["entry_price"] = fill["price"]
-            state["total_volume"] = fill["volume"]
-            state["remaining_ratio"] = 1.0
-            state["target_buy_amount"] = target_amount
-            state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
-            state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
-            state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
-            state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
-            new_stop, stop_basis = calc_breakout_stop(
-                confirmed_low, fill["price"], prev_low
-            )
-            state["effective_ref_low"] = new_stop
-
-            signals.append({
-                "Ticker": ticker,
-                "Event": "BUY (BREAKOUT ALL-IN)",
-                "Entry_Price": round(fill["price"], 2),
-                "Stop_Loss_Adjusted": new_stop,
-            })
-
-            SendMessage(
-                f"<b>🚀 [BST 봇] 돌파 매수 발생! (BREAKOUT ALL-IN)</b>\n"
-                f"• <b>종목</b>: {ticker}\n"
-                f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
-                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (배정 총액 {target_amount:,.0f}원 중 100% 전액 매수)\n"
-                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
-                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
-            )
-
-            save_trade_to_google_sheet(
-                ticker=ticker,
-                trade_type="매수",
-                event_name="BUY (BREAKOUT ALL-IN)",
-                price=fill["price"],
-                volume=fill["volume"],
-                amount_krw=fill["amount"],
-                entry_price=fill["price"],
-                reason=(
-                    f"마감확정일봉 기준봉 고가 완벽 상향 돌파 100% 전액 매수"
-                    f" (변동성 배정: {target_amount:,.0f}원)"
-                ),
-            )
-
-        elif is_pullback:
-          # 2) 눌림목 매매: 손절가(기준봉 저가) 기반 변동성 사이징 산출 후 1차 분할 매수 진행 (1/3 금액)
-          target_amount = calc_position_size(curr_close, state["effective_ref_low"])
-          tranche_amount = target_amount / target_scale_in_steps
-          fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
-          if fill["ok"]:
-            state["entry_bought"] = True
-            state["entry_price"] = fill["price"]
-            state["total_volume"] = fill["volume"]
-            state["remaining_ratio"] = 1.0
-            state["target_buy_amount"] = target_amount
-            state["scale_in_count"] = 1
-            state["last_scale_in_date"] = curr_candle_date  # 1일 1회 분할 매수 제한
-            state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용, 추가 매수 시 유지)
-            # 2차 파동 기점 = 기준봉 이후 ~ 어제(확정봉) 구간의 눌림 저점(L1). 이론상 2차 파동은 L1에서 시작하므로
-            # 진입가·진입일 대신 L1 가격·날짜를 기준점으로 삼아 가격 목표(L1 + wave_height)와 기간 카운트를 정밀화
-            anchor_price, anchor_date = find_pullback_low(
-                df, state["active_ref_date"], fill["price"], curr_candle_date
-            )
-            state["wave_anchor_price"] = anchor_price
-            state["wave_anchor_date"] = anchor_date  # 추가 매수·재매수 시 유지
-
-            signals.append({
-                "Ticker": ticker,
-                "Event": "BUY (PULLBACK 1/3)",
-                "Entry_Price": round(fill["price"], 2),
-            })
-
-            SendMessage(
-                f"<b>🔵 [BST 봇] 눌림목 매수 시그널 발생! (1/{target_scale_in_steps}차 분할 매수)</b>\n"
-                f"• <b>종목</b>: {ticker}\n"
-                f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
-                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (1차 매수)\n"
-                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
-            )
-
-            save_trade_to_google_sheet(
-                ticker=ticker,
-                trade_type="매수",
-                event_name=f"BUY (PULLBACK 1/{target_scale_in_steps})",
-                price=fill["price"],
-                volume=fill["volume"],
-                amount_krw=fill["amount"],
-                entry_price=fill["price"],
-                reason=(
-                    "마감확정일봉 기준 중심가 이하 저가 터치 후 양봉 반등"
-                    f" 1/{target_scale_in_steps}차 분할 매수"
-                ),
-            )
-
-      # B. 눌림목 진입 후 3회차 미만에 도달해 있는 추가 매수 관리
-      elif (
-          state["entry_bought"]
-          and state["scale_in_count"] < target_scale_in_steps
-          and state["remaining_ratio"] > 0
-      ):
-        if is_breakout:
-          # 1) 눌림목 1~2회차 진행 중 고가 돌파 시: 남은 금액을 전액(한번에) 매수하여 배정 금액 채우고 손절가 상향
-          allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
-          remaining_steps = target_scale_in_steps - state["scale_in_count"]
-          remaining_amount = (
-              allocated_total / target_scale_in_steps
-          ) * remaining_steps
-          fill = execute_buy(upbit_client, ticker, remaining_amount, curr_close)
-          if fill["ok"]:
-            add_volume = fill["volume"]
-            old_volume = state["total_volume"]
-
-            state["entry_price"] = (
-                (state["entry_price"] * old_volume)
-                + (fill["price"] * add_volume)
-            ) / (old_volume + add_volume)
-            state["total_volume"] += add_volume
-            state["scale_in_count"] = target_scale_in_steps
-            prev_low = state["effective_ref_low"]
-            # 손실 상한은 잔액 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
-            new_stop, stop_basis = calc_breakout_stop(
-                confirmed_low, state["entry_price"], prev_low
-            )
-            state["effective_ref_low"] = new_stop
-
-            signals.append({
-                "Ticker": ticker,
-                "Event": "BUY (BREAKOUT FULL SCALE-IN)",
-                "Entry_Price": round(state["entry_price"], 2),
-                "Stop_Loss_Adjusted": new_stop,
-            })
-
-            SendMessage(
-                f"<b>🚀 [BST 봇] 고가 돌파 시그널! 남은 잔액 전액 매수 (BREAKOUT ALL-IN)</b>\n"
-                f"• <b>종목</b>: {ticker}\n"
-                f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
-                f"• <b>매수 잔액</b>: {fill['amount']:,.0f}원 (남은 금액 집행 ➔ 3/{target_scale_in_steps}차 완료)\n"
-                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
-                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
-            )
-
-            save_trade_to_google_sheet(
-                ticker=ticker,
-                trade_type="매수",
-                event_name="BUY (BREAKOUT FULL SCALE-IN)",
-                price=fill["price"],
-                volume=add_volume,
-                amount_krw=fill["amount"],
-                entry_price=state["entry_price"],
-                reason="눌림목 진행 중 마감확정일봉 고가 돌파 잔액 전액 매수",
-            )
-
-        elif is_pullback and can_scale_in_today:
-          # 2) 순수 추가 눌림목 조건 만족 시: 1/3 금액만큼 다음 회차 분할 매수 진행
-          # (같은 확정봉 기준으로 하루 내내 조건이 유지되므로, 1일 1회로 제한해
-          #  5분 주기마다 연속 체결되는 것을 방지)
-          allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
-          tranche_amount = allocated_total / target_scale_in_steps
-          fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
-          if fill["ok"]:
-            state["scale_in_count"] += 1
-            state["last_scale_in_date"] = curr_candle_date
-            add_volume = fill["volume"]
-            old_volume = state["total_volume"]
-
-            state["entry_price"] = (
-                (state["entry_price"] * old_volume)
-                + (fill["price"] * add_volume)
-            ) / (old_volume + add_volume)
-            state["total_volume"] += add_volume
-
-            signals.append({
-                "Ticker": ticker,
-                "Event": f"BUY (PULLBACK {state['scale_in_count']}/{target_scale_in_steps})",
-                "Entry_Price": round(state["entry_price"], 2),
-            })
-
-            SendMessage(
-                f"<b>🔵 [BST 봇] 눌림목 추가 매수 시그널! ({state['scale_in_count']}/{target_scale_in_steps}차 분할 매수)</b>\n"
-                f"• <b>종목</b>: {ticker}\n"
-                f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
-                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원\n"
-                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
-            )
-
-            save_trade_to_google_sheet(
-                ticker=ticker,
-                trade_type="매수",
-                event_name=f"BUY (PULLBACK {state['scale_in_count']}/{target_scale_in_steps})",
-                price=fill["price"],
-                volume=add_volume,
-                amount_krw=fill["amount"],
-                entry_price=state["entry_price"],
-                reason=(
-                    "마감확정일봉 눌림목 반등 추가"
-                    f" {state['scale_in_count']}/{target_scale_in_steps}차 분할 매수"
-                ),
-            )
-
-    # [매도 및 5일선 관리 체크]
+    # [1. 매도 및 5일선 관리 체크 (최우선 순위 실행)]
+    # 보유 포지션의 대칭 익절 및 5일선 꺾임 매도를 매수보다 항상 먼저 평가/집행하여,
+    # 현금과 보유 종목 슬롯(MAX_OPEN_POSITIONS)을 사전에 확보하고 청산 당일 불필요한 추가 매수를 원천 차단한다.
     if state["entry_bought"] and state["remaining_ratio"] > 0:
       entry_price = state["entry_price"]
       current_return = (curr_close - entry_price) / entry_price
@@ -2317,6 +1979,354 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                   f" (기준가 {format_price(sell_price)} 기록)"
               ),
           )
+
+    # [2. 최신 포지션 수량 기반 상한선 판정]
+    # (앞선 매도 블록에서 청산된 종목은 remaining_ratio=0이 되어 보유 수량 집계에서 즉시 제외됨)
+    target_scale_in_steps = 3 if ENABLE_SCALE_IN_BUY else 1
+    open_positions = count_open_positions(global_state)
+    can_open_new = open_positions < MAX_OPEN_POSITIONS
+
+    # [3. 재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 > prev_ma5, 보합 제외) 동시 확인 시 재매수
+    if (
+        allow_entry
+        and can_open_new
+        and state["base_price"] is not None
+        and curr_close > state["base_price"]
+        and curr_ma5 > prev_ma5
+        and state["remaining_ratio"] == 0
+    ):
+      # 재매수 금액 = 직전 5일선 매도 금액(base_amount). 대칭 익절로 잔여가 25%만 남은 채 매도됐다면
+      # 재매수도 그만큼만 하여, 매도 직전보다 포지션이 커지는 것을 방지 (구버전 상태는 100만원으로 폴백)
+      re_entry_amount = state.get("base_amount") or ORDER_AMOUNT_KRW
+      fill = execute_buy(upbit_client, ticker, re_entry_amount, curr_close)
+      # 체결 0이면 기준가(base_price)를 유지해 다음 주기에 재매수 재시도
+      if fill["ok"]:
+        entry_price = fill["price"]
+        total_volume = fill["volume"]
+        state["entry_bought"] = True
+        state["entry_price"] = entry_price
+        state["total_volume"] = total_volume
+        state["remaining_ratio"] = 1.0
+        state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
+        # 파동 기준점(wave_anchor_*)과 대칭 익절 플래그(symmetry_tp_executed)는 '파동' 단위 상태라 재매수로 갱신하지 않는다.
+        # 재매수는 항상 이전 매도가보다 높게 되사므로, 기준점을 진입가로 옮기면 대칭 목표가 매번 위로 도망가
+        # 원래 파동의 목표에 결코 도달하지 못한다. 구버전 상태(기준점 미기록)만 현재 진입값으로 백필.
+        if not state.get("wave_anchor_price"):
+          state["wave_anchor_price"] = entry_price
+          state["wave_anchor_date"] = curr_candle_date
+        # 재매수 금액과 무관하게 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
+        # (재매수 후 눌림목 조건에 다시 걸려 추가 분할 매수가 겹치는 과매수 경로 차단. 이후는 매도 로직만 동작)
+        state["scale_in_count"] = target_scale_in_steps
+        triggered_base_price = state["base_price"]
+        triggered_base_date = state.get("base_price_date")
+        state["base_price"] = None
+        state["base_amount"] = None
+        state["base_price_date"] = None
+
+        # 왕복 비용 로깅 (현재가 기준 판정을 유지하기로 한 결정에 따른 실측 데이터 수집용, 매매 제한 없음).
+        # 재매수가가 매도가보다 높은 만큼이 이번 왕복의 실질 비용(수수료·슬리피지 제외, 가격차만).
+        round_trip_pct = (
+            (entry_price - triggered_base_price) / triggered_base_price
+            if triggered_base_price > 0
+            else 0.0
+        )
+        round_trip_note = f"매도가 대비 {round_trip_pct * 100:+.2f}%에 재매수"
+        if triggered_base_date:
+          days_in_limbo = (
+              pd.Timestamp(curr_candle_date) - pd.Timestamp(triggered_base_date)
+          ).days
+          round_trip_note += f" ({triggered_base_date} 매도 후 {days_in_limbo}일 만)"
+
+        signals.append({
+            "Ticker": ticker,
+            "Event": "BUY (RE-ENTRY)",
+            "Strategy": (
+                f"기준가({triggered_base_price}) 현재가 상향 돌파 & 5일선 상승 전환"
+                f" -> 매도 금액과 동일하게 재매수 ({fill['amount']:,.0f}원) | {round_trip_note}"
+            ),
+            "Entry_Price": round(entry_price, 2),
+        })
+
+        # 텔레그램 재매수 알림
+        SendMessage(
+            f"<b>🚀 [BST 봇] 재매수 시그널 발생! (RE-ENTRY)</b>\n"
+            f"• <b>종목</b>: {ticker}\n"
+            f"• <b>전략</b>: 이전 매도 기준가({format_price(triggered_base_price)}) 현재가 상향 돌파 + 5일선 상승 전환 확인\n"
+            f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
+            f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)\n"
+            f"• <b>왕복 비용</b>: {round_trip_note}\n"
+            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        )
+
+        save_trade_to_google_sheet(
+            ticker=ticker,
+            trade_type="매수",
+            event_name="BUY (RE-ENTRY)",
+            price=entry_price,
+            volume=total_volume,
+            amount_krw=fill["amount"],
+            entry_price=entry_price,
+            return_pct=round_trip_pct,
+            reason=(
+                f"이전 매도 기준가({format_price(triggered_base_price)}) 상향 돌파"
+                f" & 5일선 상승 전환 재매수 (매도 금액과 동일) | {round_trip_note}"
+            ),
+        )
+
+    # [4. 진입 및 매수 체크] (allow_entry=False면 매도 감시만 수행하므로 전체 건너뜀)
+    if allow_entry and (
+        not state["entry_bought"]
+        or (
+            ENABLE_SCALE_IN_BUY
+            and state["scale_in_count"] < target_scale_in_steps
+            and state["remaining_ratio"] > 0
+        )
+    ):
+      is_pullback = False
+      if ENABLE_PULLBACK_ENTRY:
+        # 마감 확정일봉(09:00 마감) 기준: 중심가 이하 저가 터치 후 확실한 양봉 마감 시 매수
+        price_cond = confirmed_low <= ref_mid
+        rebound_cond = (
+            (confirmed_close > confirmed_open) if REQUIRE_BULLISH_REBOUND else True
+        )
+        # 확정봉이 기준봉 자신이면(기준일 다음 날) 저가<=중심가·양봉 조건이 항상 성립하므로,
+        # 기준봉 '이후'에 마감한 봉만 눌림목 후보로 인정한다 (기준일 당일 자기 일치 차단)
+        after_ref_cond = confirmed_candle_date > state["active_ref_date"]
+        is_pullback = price_cond and rebound_cond and after_ref_cond
+
+      # 눌림목 조건은 마감 확정일봉(09:00 마감) 기준이라 하루(09:00~익일 09:00) 동안 값이 고정된다.
+      # 당일 1회 제한 가드(can_pullback_today)가 없으면 5분 주기마다 조건이 참이 되어
+      # 동일한 매수 알림이 계속 전송되거나 같은 날 3회차까지 연속 체결되므로,
+      # 눌림목 신규 진입(1차) 및 분할 추가 매수(2/3차)는 일봉 기준일당 1회로 엄격히 제한한다.
+      # (반면 기준봉 고가 돌파 매수와 5일선 매도 후 재매수는 장중 실시간 5분 주기 감시이므로 당일 1회 제한을 받지 않음)
+      can_pullback_today = state.get("last_scale_in_date") != curr_candle_date
+
+      is_breakout = False
+      if ENABLE_BREAKOUT_ENTRY:
+        # 실시간 현재가가 기준봉 고가를 상향 돌파 시 매수 (5분 주기 실시간 감시)
+        is_breakout = curr_close > ref_high
+
+      # A. 신규 진입 (포지션 미보유 상태) - 동시 보유 상한 도달 시 신규 진입 생략
+      if (
+          not state["entry_bought"]
+          and not can_open_new
+          and (is_breakout or (is_pullback and can_pullback_today))
+      ):
+        print(
+            f"[{ticker}] [보유 상한] 진입 신호 있으나 동시 보유 {open_positions}/{MAX_OPEN_POSITIONS}"
+            " 도달 -> 신규 진입 생략"
+        )
+      if not state["entry_bought"] and can_open_new:
+        if is_breakout:
+          # 1) 돌파 매매: 현재가가 기준봉 고가 돌파 시 변동성 사이징 산출 후 전액 매수 (장중 실시간 5분 주기 감시)
+          prev_low = state["effective_ref_low"]
+          expected_stop, _ = calc_breakout_stop(
+              confirmed_low, curr_close, prev_low
+          )
+          target_amount = calc_position_size(curr_close, expected_stop)
+          fill = execute_buy(upbit_client, ticker, target_amount, curr_close)
+          if fill["ok"]:
+            state["last_scale_in_date"] = curr_candle_date
+            state["entry_bought"] = True
+            state["entry_price"] = fill["price"]
+            state["total_volume"] = fill["volume"]
+            state["remaining_ratio"] = 1.0
+            state["target_buy_amount"] = target_amount
+            state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
+            state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
+            state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
+            state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
+            new_stop, stop_basis = calc_breakout_stop(
+                confirmed_low, fill["price"], prev_low
+            )
+            state["effective_ref_low"] = new_stop
+
+            signals.append({
+                "Ticker": ticker,
+                "Event": "BUY (BREAKOUT ALL-IN)",
+                "Entry_Price": round(fill["price"], 2),
+                "Stop_Loss_Adjusted": new_stop,
+            })
+
+            SendMessage(
+                f"<b>🚀 [BST 봇] 돌파 매수 발생! (BREAKOUT ALL-IN)</b>\n"
+                f"• <b>종목</b>: {ticker}\n"
+                f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
+                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (배정 총액 {target_amount:,.0f}원 중 100% 전액 매수)\n"
+                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
+                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+            )
+
+            save_trade_to_google_sheet(
+                ticker=ticker,
+                trade_type="매수",
+                event_name="BUY (BREAKOUT ALL-IN)",
+                price=fill["price"],
+                volume=fill["volume"],
+                amount_krw=fill["amount"],
+                entry_price=fill["price"],
+                reason=(
+                    f"실시간 현재가 기준봉 고가 상향 돌파 100% 전액 매수"
+                    f" (변동성 배정: {target_amount:,.0f}원)"
+                ),
+            )
+
+        elif is_pullback and can_pullback_today:
+          # 2) 눌림목 매매: 손절가(기준봉 저가) 기반 변동성 사이징 산출 후 1차 분할 매수 진행 (1/3 금액, 당일 1회 한정)
+          target_amount = calc_position_size(curr_close, state["effective_ref_low"])
+          tranche_amount = target_amount / target_scale_in_steps
+          fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
+          if fill["ok"]:
+            # 당일 1회 진입 성공 기록 (5분마다 중복 주문/알림 발송 원천 차단)
+            state["last_scale_in_date"] = curr_candle_date
+            state["entry_bought"] = True
+            state["entry_price"] = fill["price"]
+            state["total_volume"] = fill["volume"]
+            state["remaining_ratio"] = 1.0
+            state["target_buy_amount"] = target_amount
+            state["scale_in_count"] = 1
+            state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용, 추가 매수 시 유지)
+            # 2차 파동 기점 = 기준봉 이후 ~ 어제(확정봉) 구간의 눌림 저점(L1). 이론상 2차 파동은 L1에서 시작하므로
+            # 진입가·진입일 대신 L1 가격·날짜를 기준점으로 삼아 가격 목표(L1 + wave_height)와 기간 카운트를 정밀화
+            anchor_price, anchor_date = find_pullback_low(
+                df, state["active_ref_date"], fill["price"], curr_candle_date
+            )
+            state["wave_anchor_price"] = anchor_price
+            state["wave_anchor_date"] = anchor_date  # 추가 매수·재매수 시 유지
+
+            signals.append({
+                "Ticker": ticker,
+                "Event": "BUY (PULLBACK 1/3)",
+                "Entry_Price": round(fill["price"], 2),
+            })
+
+            SendMessage(
+                f"<b>🔵 [BST 봇] 눌림목 매수 시그널 발생! (1/{target_scale_in_steps}차 분할 매수)</b>\n"
+                f"• <b>종목</b>: {ticker}\n"
+                f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
+                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (1차 매수)\n"
+                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+            )
+
+            save_trade_to_google_sheet(
+                ticker=ticker,
+                trade_type="매수",
+                event_name=f"BUY (PULLBACK 1/{target_scale_in_steps})",
+                price=fill["price"],
+                volume=fill["volume"],
+                amount_krw=fill["amount"],
+                entry_price=fill["price"],
+                reason=(
+                    "마감확정일봉 기준 중심가 이하 저가 터치 후 양봉 반등"
+                    f" 1/{target_scale_in_steps}차 분할 매수"
+                ),
+            )
+
+      # B. 눌림목 진입 후 3회차 미만에 도달해 있는 추가 매수 관리
+      elif (
+          state["entry_bought"]
+          and state["scale_in_count"] < target_scale_in_steps
+          and state["remaining_ratio"] > 0
+      ):
+        if is_breakout:
+          # 1) 눌림목 1~2회차 진행 중 실시간 고가 돌파 시: 남은 금액을 전액(한번에) 매수하여 배정 금액 채우고 손절가 상향 (실시간 5분 감시)
+          allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
+          remaining_steps = target_scale_in_steps - state["scale_in_count"]
+          remaining_amount = (
+              allocated_total / target_scale_in_steps
+          ) * remaining_steps
+          fill = execute_buy(upbit_client, ticker, remaining_amount, curr_close)
+          if fill["ok"]:
+            state["last_scale_in_date"] = curr_candle_date
+            add_volume = fill["volume"]
+            old_volume = state["total_volume"]
+
+            state["entry_price"] = (
+                (state["entry_price"] * old_volume)
+                + (fill["price"] * add_volume)
+            ) / (old_volume + add_volume)
+            state["total_volume"] += add_volume
+            state["scale_in_count"] = target_scale_in_steps
+            prev_low = state["effective_ref_low"]
+            # 손실 상한은 잔액 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
+            new_stop, stop_basis = calc_breakout_stop(
+                confirmed_low, state["entry_price"], prev_low
+            )
+            state["effective_ref_low"] = new_stop
+
+            signals.append({
+                "Ticker": ticker,
+                "Event": "BUY (BREAKOUT FULL SCALE-IN)",
+                "Entry_Price": round(state["entry_price"], 2),
+                "Stop_Loss_Adjusted": new_stop,
+            })
+
+            SendMessage(
+                f"<b>🚀 [BST 봇] 고가 돌파 시그널! 남은 잔액 전액 매수 (BREAKOUT ALL-IN)</b>\n"
+                f"• <b>종목</b>: {ticker}\n"
+                f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
+                f"• <b>매수 잔액</b>: {fill['amount']:,.0f}원 (남은 금액 집행 ➔ 3/{target_scale_in_steps}차 완료)\n"
+                f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
+                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+            )
+
+            save_trade_to_google_sheet(
+                ticker=ticker,
+                trade_type="매수",
+                event_name="BUY (BREAKOUT FULL SCALE-IN)",
+                price=fill["price"],
+                volume=add_volume,
+                amount_krw=fill["amount"],
+                entry_price=state["entry_price"],
+                reason="눌림목 진행 중 실시간 고가 돌파 잔액 전액 매수",
+            )
+
+        elif is_pullback and can_pullback_today:
+          # 2) 순수 추가 눌림목 조건 만족 시: 1/3 금액만큼 다음 회차 분할 매수 진행
+          # (같은 확정봉 기준으로 하루 내내 조건이 유지되므로, 1일 1회로 제한해
+          #  5분 주기마다 연속 체결되는 것을 방지)
+          allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
+          tranche_amount = allocated_total / target_scale_in_steps
+          state["last_scale_in_date"] = curr_candle_date
+          fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
+          if fill["ok"]:
+            state["scale_in_count"] += 1
+            add_volume = fill["volume"]
+            old_volume = state["total_volume"]
+
+            state["entry_price"] = (
+                (state["entry_price"] * old_volume)
+                + (fill["price"] * add_volume)
+            ) / (old_volume + add_volume)
+            state["total_volume"] += add_volume
+
+            signals.append({
+                "Ticker": ticker,
+                "Event": f"BUY (PULLBACK {state['scale_in_count']}/{target_scale_in_steps})",
+                "Entry_Price": round(state["entry_price"], 2),
+            })
+
+            SendMessage(
+                f"<b>🔵 [BST 봇] 눌림목 추가 매수 시그널! ({state['scale_in_count']}/{target_scale_in_steps}차 분할 매수)</b>\n"
+                f"• <b>종목</b>: {ticker}\n"
+                f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
+                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원\n"
+                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+            )
+
+            save_trade_to_google_sheet(
+                ticker=ticker,
+                trade_type="매수",
+                event_name=f"BUY (PULLBACK {state['scale_in_count']}/{target_scale_in_steps})",
+                price=fill["price"],
+                volume=add_volume,
+                amount_krw=fill["amount"],
+                entry_price=state["entry_price"],
+                reason=(
+                    "마감확정일봉 눌림목 반등 추가"
+                    f" {state['scale_in_count']}/{target_scale_in_steps}차 분할 매수"
+                ),
+            )
 
   return signals
 
