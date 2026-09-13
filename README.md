@@ -457,3 +457,23 @@
     - 중심가 상회 시 고가 ➔ [현재가] ➔ 중심가 ➔ 손절가 행 순서 검증 통과 (PASS)
   - **실전 런타임 구동 검증**: `python scan_ref_candles.py` 실행을 통해 실제 라이브 마켓 데이터 기준 NEAR, WAVES 메시지 발송 및 포맷 일치 확인
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+## 📝 [2026-09-14 01:05] 업데이트 이력 (Commit ID: 48520af)
+- **수정 내용** (매매 알림 사유 구체화 및 `.env` UPBIT_PAPER_TRADING=False 연동 지원, 파일: `Upbit_Anchor_Wave_Bot.py`):
+  1. **매수/매도 텔레그램 알림 메시지 내 구체적 사유 및 가격대 정보 반영**:
+     - **눌림목 1차/추가 매수**: 기준봉 일자, 중심가 이하 저점 터치(저가), 확정 일봉 양봉 반등 마감(시가 ➔ 종가), 기준봉 가격대(고가/중심가/손절가)를 상세 명시
+     - **기준봉 고가 돌파 매수 (신규 및 잔액 전액)**: 실시간 현재가의 기준봉 고가 상향 돌파 사유 명시
+     - **5일선 추세 매도 후 재매수 (RE-ENTRY)**: 직전 매도 기준가 현재가 상향 돌파 및 5일선 우상향 전환(직전 MA5 ➔ 현재 MA5) 사유 명시
+     - **시장가 손절 매도 (STOP LOSS)**: 기준봉 손절 마진노선 하향 이탈 사유 명시
+     - **5일선 추세 매도 (MA5 DOWN)**: 5일선 하향 꺾임(직전 MA5 ➔ 현재 MA5) 및 버퍼 이탈 사유 명시
+     - **대칭 익절 매도 (PARTIAL SELL)**: 레이블을 `• 매도 사유:`로 통일하고 목표치 세부 정보 유지
+  2. **환경변수 모드 인식 개선 (`UPBIT_PAPER_TRADING=False` 자동 지원)**:
+     - `.env`에 정의된 `UPBIT_PAPER_TRADING` 값을 최우선으로 검사하여 `False` 설정 시 `AUTO_TRADE_EXECUTE=True`(실주문 모드)로 자동 전환되도록 로직 개선 (하위 호환으로 `AUTO_TRADE_EXECUTE`도 동시 지원)
+  3. **5분 주기 모니터링 콘솔 로그 강화**:
+     - 5분 주기 크론탭 실행 시 현재 활성화된 모드(`🔴 실제 주문 모드` vs `🟢 모의/스캔 모드`)를 터미널 콘솔 로그에 명확히 출력하도록 추가
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **환경변수 모드 판정 검증**: `UPBIT_PAPER_TRADING=False` 시 실주문 모드(`True`), `True` 시 모의 모드(`False`) 정상 분기 확인
+  - **전략 단위 테스트 5종 전원 통과 (`test_strategy_order_and_once_a_day.py`)**: 5/5 통과
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료
+
