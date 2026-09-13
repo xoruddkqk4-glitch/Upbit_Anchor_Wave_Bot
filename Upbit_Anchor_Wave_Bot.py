@@ -37,10 +37,28 @@ GOOGLE_SPREADSHEET_ID = (
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
 
 # 매매 및 실행 모드 설정 (.env의 UPBIT_PAPER_TRADING=False 인 경우 실주문 모드 전환, 기본값 False=스캔/모의 모드)
-AUTO_TRADE_EXECUTE = os.getenv("AUTO_TRADE_EXECUTE", "False").lower() in [
-    "true",
-    "1",
-]
+# UPBIT_PAPER_TRADING 설정을 최우선으로 인식하며, 하위 호환으로 AUTO_TRADE_EXECUTE도 함께 지원
+_paper_env = os.getenv("UPBIT_PAPER_TRADING")
+if _paper_env is not None:
+  AUTO_TRADE_EXECUTE = _paper_env.strip().lower() in [
+      "false",
+      "0",
+      "f",
+      "n",
+      "no",
+  ]
+else:
+  _auto_env = os.getenv("AUTO_TRADE_EXECUTE")
+  if _auto_env is not None:
+    AUTO_TRADE_EXECUTE = _auto_env.strip().lower() in [
+        "true",
+        "1",
+        "t",
+        "y",
+        "yes",
+    ]
+  else:
+    AUTO_TRADE_EXECUTE = False
 
 # 감시 종목 설정 (지정된 20개 코인 감시)
 TARGET_TICKERS = [
@@ -1726,7 +1744,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>매도가</b>: {format_price(sell_price)}\n"
             f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
-            f"• <b>사유</b>: 기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 -> 시장가 즉시 전량 손절"
+            f"• <b>매도 사유</b>: 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 손절 마진노선({format_price(effective_ref_low)}) 하향 이탈 ➔ 전량 시장가 손절"
             f"{fill_note}\n"
             f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
@@ -1894,7 +1912,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f"• <b>매도가</b>: {format_price(sell_price)}\n"
               f"• <b>수익률</b>: <b>{realized_return * 100:+.2f}%</b>\n"
               f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b> (수수료 차감)\n"
-              f"• <b>사유</b>: {symmetry_reason}\n"
+              f"• <b>매도 사유</b>: {symmetry_reason}\n"
               f"• <b>대칭 목표</b>: 가격 {format_price(price_target)} / 기간 {rise_duration}일 (파동 기점 {state['wave_anchor_date']} 후 {days_since_anchor}일 경과)"
               f"{fill_note}{wave_done_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
@@ -1967,7 +1985,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f"• <b>매도가</b>: {format_price(sell_price)}\n"
               f"• <b>수익률</b>: <b>{ret_pct * 100:+.2f}%</b>\n"
               f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b> (수수료 차감)\n"
-              f"• <b>사유</b>: 5일선 하향 꺾임{buffer_note} -> 잔여 전액 매도 (기준가 {format_price(sell_price)} 기록)"
+              f"• <b>매도 사유</b>: 5일선 하향 꺾임(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}){buffer_note} 확인 ➔ 잔여 전액 추세 매도 (재매수 기준가 {format_price(sell_price)} 기록)"
               f"{fill_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
@@ -2059,9 +2077,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         SendMessage(
             f"<b>🚀 [BST 봇] 재매수 시그널 발생! (RE-ENTRY)</b>\n"
             f"• <b>종목</b>: {ticker}\n"
-            f"• <b>전략</b>: 이전 매도 기준가({format_price(triggered_base_price)}) 현재가 상향 돌파 + 5일선 상승 전환 확인\n"
             f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
             f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)\n"
+            f"• <b>매수 사유</b>: 직전 매도 기준가({format_price(triggered_base_price)}) 현재가 상향 돌파 + 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}) 확인\n"
             f"• <b>왕복 비용</b>: {round_trip_note}\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
@@ -2161,6 +2179,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
                 f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (배정 총액 {target_amount:,.0f}원 중 100% 전액 매수)\n"
+                f"• <b>매수 사유</b>: 실시간 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 고가({format_price(ref_high)}) 상향 돌파 확인\n"
                 f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
@@ -2212,7 +2231,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 f"<b>🔵 [BST 봇] 눌림목 매수 시그널 발생! (1/{target_scale_in_steps}차 분할 매수)</b>\n"
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
-                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (1차 매수)\n"
+                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (1차 분할 매수)\n"
+                f"• <b>매수 사유</b>: 기준봉({state['active_ref_date']}) 중심가({format_price(ref_mid)}) 이하 저점 터치(저가 {format_price(confirmed_low)}) 후 확정 일봉({confirmed_candle_date}) 양봉 반등 마감(시가 {format_price(confirmed_open)} ➔ 종가 {format_price(confirmed_close)}) 확인\n"
+                f"• <b>기준봉 가격대</b>: 고가 {format_price(ref_high)} | 중심가 {format_price(ref_mid)} | 손절가 {format_price(state['effective_ref_low'])}\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
 
@@ -2274,6 +2295,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
                 f"• <b>매수 잔액</b>: {fill['amount']:,.0f}원 (남은 금액 집행 ➔ 3/{target_scale_in_steps}차 완료)\n"
+                f"• <b>매수 사유</b>: 눌림목 진행 중 실시간 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 고가({format_price(ref_high)}) 상향 돌파 확인\n"
                 f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
@@ -2319,6 +2341,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
                 f"• <b>매수 금액</b>: {fill['amount']:,.0f}원\n"
+                f"• <b>매수 사유</b>: 기준봉({state['active_ref_date']}) 중심가({format_price(ref_mid)}) 이하 눌림목 지지 반등 지속 확인 ({state['scale_in_count']}/{target_scale_in_steps}차 집행)\n"
+                f"• <b>기준봉 가격대</b>: 고가 {format_price(ref_high)} | 중심가 {format_price(ref_mid)} | 손절가 {format_price(state['effective_ref_low'])}\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
 
@@ -2431,6 +2455,12 @@ def _run_market_scan_locked():
       f" [모니터링] [{now_str}] BST 5분 주기 크론탭 모니터링 (09:07 포착 기준봉 감시 종목:"
       f" {len(tickers)}개)"
   )
+  mode_label = (
+      "🔴 실제 주문 모드 (REAL TRADING - 업비트 실주문 전송)"
+      if AUTO_TRADE_EXECUTE
+      else "🟢 모의/스캔 모드 (PAPER TRADING - 주문 없음, 로그/알림만)"
+  )
+  print(f"  [실행 모드] {mode_label}")
   if tickers:
     print(f"  [리스트] 감시 종목 목록: {tickers}")
     if held_excluded:
