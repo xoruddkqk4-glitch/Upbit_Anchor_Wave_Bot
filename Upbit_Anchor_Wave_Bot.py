@@ -1407,6 +1407,8 @@ def new_ticker_state():
       "scale_in_count": 0,
       "last_scale_in_date": None,
       "base_price": None,
+      "base_amount": None,  # 5일선 매도 시점의 실제 매도 금액. 재매수 시 이 금액만큼만 되사서 포지션 크기를 매도 직전과 맞춘다
+      "base_price_date": None,  # 5일선 매도 일자. 재매수 시 왕복 소요일수·비용을 로깅하는 데 사용(제한 용도 아님)
       "wave_anchor_price": None,
       "wave_anchor_date": None,
       "time_sym_below_high_logged": False,
@@ -1597,7 +1599,10 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         and curr_ma5 > prev_ma5
         and state["remaining_ratio"] == 0
     ):
-      fill = execute_buy(upbit_client, ticker, ORDER_AMOUNT_KRW, curr_close)
+      # 재매수 금액 = 직전 5일선 매도 금액(base_amount). 대칭 익절로 잔여가 25%만 남은 채 매도됐다면
+      # 재매수도 그만큼만 하여, 매도 직전보다 포지션이 커지는 것을 방지 (구버전 상태는 100만원으로 폴백)
+      re_entry_amount = state.get("base_amount") or ORDER_AMOUNT_KRW
+      fill = execute_buy(upbit_client, ticker, re_entry_amount, curr_close)
       # 체결 0이면 기준가(base_price)를 유지해 다음 주기에 재매수 재시도
       if fill["ok"]:
         entry_price = fill["price"]
@@ -1613,19 +1618,35 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         if not state.get("wave_anchor_price"):
           state["wave_anchor_price"] = entry_price
           state["wave_anchor_date"] = curr_candle_date
-        # 최대 금액 전액 재매수이므로 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
-        # (이전 사이클이 1/3만 진입한 채 5일선에 팔린 경우, 재매수 후 눌림목 조건에 걸리면
-        #  2/3가 더 들어가 133만원이 되는 과매수 경로 차단). 이후는 매도 로직만 동작.
+        # 재매수 금액과 무관하게 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
+        # (재매수 후 눌림목 조건에 다시 걸려 추가 분할 매수가 겹치는 과매수 경로 차단. 이후는 매도 로직만 동작)
         state["scale_in_count"] = target_scale_in_steps
         triggered_base_price = state["base_price"]
+        triggered_base_date = state.get("base_price_date")
         state["base_price"] = None
+        state["base_amount"] = None
+        state["base_price_date"] = None
+
+        # 왕복 비용 로깅 (현재가 기준 판정을 유지하기로 한 결정에 따른 실측 데이터 수집용, 매매 제한 없음).
+        # 재매수가가 매도가보다 높은 만큼이 이번 왕복의 실질 비용(수수료·슬리피지 제외, 가격차만).
+        round_trip_pct = (
+            (entry_price - triggered_base_price) / triggered_base_price
+            if triggered_base_price > 0
+            else 0.0
+        )
+        round_trip_note = f"매도가 대비 {round_trip_pct * 100:+.2f}%에 재매수"
+        if triggered_base_date:
+          days_in_limbo = (
+              pd.Timestamp(curr_candle_date) - pd.Timestamp(triggered_base_date)
+          ).days
+          round_trip_note += f" ({triggered_base_date} 매도 후 {days_in_limbo}일 만)"
 
         signals.append({
             "Ticker": ticker,
             "Event": "BUY (RE-ENTRY)",
             "Strategy": (
                 f"기준가({triggered_base_price}) 현재가 상향 돌파 & 5일선 상승 전환"
-                " -> 100만원 재매수"
+                f" -> 매도 금액과 동일하게 재매수 ({fill['amount']:,.0f}원) | {round_trip_note}"
             ),
             "Entry_Price": round(entry_price, 2),
         })
@@ -1636,7 +1657,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>전략</b>: 이전 매도 기준가({format_price(triggered_base_price)}) 현재가 상향 돌파 + 5일선 상승 전환 확인\n"
             f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
-            f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수\n"
+            f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)\n"
+            f"• <b>왕복 비용</b>: {round_trip_note}\n"
             f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
 
@@ -1648,9 +1670,10 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             volume=total_volume,
             amount_krw=fill["amount"],
             entry_price=entry_price,
+            return_pct=round_trip_pct,
             reason=(
                 f"이전 매도 기준가({format_price(triggered_base_price)}) 상향 돌파"
-                " & 5일선 상승 전환 재매수"
+                f" & 5일선 상승 전환 재매수 (매도 금액과 동일) | {round_trip_note}"
             ),
         )
 
@@ -2065,9 +2088,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               if state["total_volume"] > 0
               else 0.0
           )
-          # 완전 청산된 경우에만 재매수 기준가를 확정 기록
+          # 완전 청산된 경우에만 재매수 기준가/기준금액을 확정 기록
+          # (base_amount = 이번에 실제로 판 금액. 재매수 시 이 금액만큼만 되사서 대칭 익절로 축소된
+          #  포지션이 재매수 때 다시 최대 금액으로 부풀지 않도록 한다)
           if not fill_note:
             state["base_price"] = sell_price
+            state["base_amount"] = sell_amount
+            state["base_price_date"] = curr_candle_date
 
           signals.append({
               "Ticker": ticker,
