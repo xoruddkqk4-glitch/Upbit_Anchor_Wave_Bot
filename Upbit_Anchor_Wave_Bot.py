@@ -1403,6 +1403,7 @@ def new_ticker_state():
       "total_volume": 0.0,
       "remaining_ratio": 1.0,
       "symmetry_tp_executed": False,
+      "price_tp_executed": False,
       "scale_in_count": 0,
       "last_scale_in_date": None,
       "base_price": None,
@@ -1896,11 +1897,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
       # A. 대칭이론 익절 (2단계)
       #    1차 파동(스윙 저점 -> 기준봉 고가)의 높이(wave_height)와 기간(rise_duration)을 2차 파동에 투영한다.
-      #    [1단계] 기간 대칭: 2차 파동에 쓴 시간이 1차와 같아지면 에너지 소진 -> 50% 익절.
+      #    [1단계] 기간 대칭: 2차 파동에 쓴 시간이 1차와 같아지면 에너지 소진 -> 잔여의 절반 익절.
       #            단, '기준봉 고가 위'(2차 상승 국면)에서 창(rise_duration ± 허용오차) 안일 때만.
       #            고가 아래에서의 기간 대칭은 '조정 완료 -> 상승 기대' 신호라 매도하지 않는다(관찰 기록만).
       #            창을 지나 늦게 돌파한 경우 기간 대칭은 소멸하고 가격 대칭·5일선이 관리한다(돌파 직후 매도 방지).
-      #    [2단계] 가격 대칭: 목표가(기준점 + wave_height) 도달 시 잔여 전량. 국면 무관.
+      #    [2단계] 가격 대칭: 목표가(기준점 + wave_height) 도달 시 잔여의 절반 익절. 국면 무관.
+      #    두 단계 모두 '잔여의 절반'이라 발동 순서와 무관하게 최소 25%는 5일선 꺾임까지 추세 추종으로 남는다.
+      #    각 단계는 파동당 1회(symmetry_tp_executed / price_tp_executed).
       #    MIN_TAKE_PROFIT_PCT는 공통 하한(손실 상태에서 팔지 않도록, 실제 진입가 기준).
       if not state.get("entry_date"):
         # 구버전 상태 파일 호환: 진입일 미기록 포지션은 현재 일봉부터 기간 카운트 시작
@@ -1928,6 +1931,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       )
       is_price_symmetric_exit = (
           USE_PRICE_SYMMETRY_EXIT
+          and not state.get("price_tp_executed")
           and curr_close >= price_target
           and current_return >= MIN_TAKE_PROFIT_PCT
       )
@@ -1958,23 +1962,23 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             f"• <b>내용</b>: {observe_note}"
         )
 
+      held_vol_now = state["total_volume"] * state["remaining_ratio"]
       if is_price_symmetric_exit:
-        # 2단계 우선: 목표가 도달이면 잔여 전량 (1단계 미실행이어도 전량)
-        target_vol = state["total_volume"] * state["remaining_ratio"]
+        # 2단계 우선: 목표가 도달이면 잔여의 절반 (나머지는 5일선 꺾임까지 보유)
+        target_vol = held_vol_now * 0.5
         stage = "PRICE"
-        event_name = "SELL (PRICE SYMMETRY TARGET)"
+        event_name = "PARTIAL SELL (PRICE SYMMETRY 50%)"
         symmetry_reason = (
             f"가격 대칭 달성: 파동 기점 {format_price(state['wave_anchor_price'])} + 1차 파동 높이"
-            f" {format_price(wave_height)} = 목표가 {format_price(price_target)} 도달 -> 잔여 전량 익절"
+            f" {format_price(wave_height)} = 목표가 {format_price(price_target)} 도달 -> 잔여 절반 익절"
         )
       elif is_time_symmetric_exit:
-        held_vol_now = state["total_volume"] * state["remaining_ratio"]
-        target_vol = min(state["total_volume"] * 0.5, held_vol_now)
+        target_vol = held_vol_now * 0.5
         stage = "TIME"
         event_name = "PARTIAL SELL (TIME SYMMETRY 50%)"
         symmetry_reason = (
             f"기간 대칭 달성: 기준봉 고가 위에서 1차 파동 {rise_duration}일 대비 파동 기점 후"
-            f" {days_since_anchor}일 경과 (창 {time_window_start}~{time_window_end}일) -> 50% 익절"
+            f" {days_since_anchor}일 경과 (창 {time_window_start}~{time_window_end}일) -> 잔여 절반 익절"
         )
       else:
         target_vol = 0.0
@@ -1985,9 +1989,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       if target_vol > 0:
         fill = execute_sell(upbit_client, ticker, target_vol, curr_close)
         if fill["ok"]:
+          # 부분 체결이어도 각 단계는 1회로 확정 (매 틱 '잔여의 절반'을 반복 매도해 포지션이 녹는 것 방지)
           if stage == "TIME":
-            # 부분 체결이어도 1단계는 1회로 확정 (재시도 시 total_volume*0.5를 다시 팔아 초과 매도되는 것 방지)
             state["symmetry_tp_executed"] = True
+          else:
+            state["price_tp_executed"] = True
           sell_vol = fill["volume"]
           sell_price = fill["price"]
           sell_amount = fill["amount"]
@@ -1999,8 +2005,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           realized_pnl, realized_return = calc_net_pnl(buy_cost, sell_amount)
           fill_note = build_partial_fill_note(target_vol, sell_vol)
           wave_done_note = (
-              "\n• <b>파동 완료</b>: 포지션 전량 청산. 재매수 없이 새 기준봉 대기 (유효기간 만료 시 초기화)"
-              if stage == "PRICE" and state["remaining_ratio"] <= 0
+              f"\n• <b>잔여 보유</b>: {state['remaining_ratio'] * 100:.0f}% -> 5일선 꺾임까지 추세 추종"
+              if state["remaining_ratio"] > 0
               else ""
           )
 
@@ -2012,9 +2018,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           })
 
           title = (
-              "🟢 [BST 봇] 기간 대칭 50% 익절! (PARTIAL SELL)"
+              "🟢 [BST 봇] 기간 대칭 익절! 잔여 절반 매도 (PARTIAL SELL)"
               if stage == "TIME"
-              else "🎯 [BST 봇] 가격 대칭 목표 도달! 잔여 전량 익절 (TARGET SELL)"
+              else "🎯 [BST 봇] 가격 대칭 목표 도달! 잔여 절반 매도 (PARTIAL SELL)"
           )
           SendMessage(
               f"<b>{title}</b>\n"
