@@ -417,3 +417,25 @@
     - `test_realtime_re_entry`: 5일선 꺾임 매도 후 기준가 돌파 및 5일선 상승 전환 시 즉시 재매수 및 알림 발송 확인 (PASS)
     - `test_no_signals_sends_no_telegram`: 매매 조건 미충족 시 텔레그램 메시지 미발송 확인 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+## 📝 [2026-09-14 00:27] 업데이트 이력 (Commit ID: 8aac454)
+- **수정 내용** (스캐너 감시 종목 우선순위 엄격화, 보유/재매수 코인 보고서 포함 및 KST 타임존 고정, 파일: `scan_ref_candles.py`, `Upbit_Anchor_Wave_Bot.py`):
+  1. **감시 대상 종목(`TARGET_TICKERS`) 우선순위 엄격화 (`scan_ref_candles.py`)**:
+     - `TARGET_TICKERS`에 1개 이상의 종목이 지정되어 있으면 전일 거래대금 상위 20개 조회 로직(`get_top_trading_volume_tickers`)을 완전히 우회하고 오직 지정된 감시 종목만 정밀 스캔
+     - `TARGET_TICKERS`가 비어있을 때(`[]`)에만 전일 거래대금 상위 20개 코인 자동 추출 및 기존 활성 기준봉 종목 자동 병합 탐색
+     - `.env` 파일에 `TARGET_TICKERS=KRW-BTC,KRW-ETH` 형태로 환경변수가 지정된 경우에도 이를 최우선으로 인식하도록 연동
+  2. **매수 포지션 보유(`[보유 중]`) 및 재매수 대기(`[재매수 대기]`) 종목 보고서 누락 버그 해결 (`scan_ref_candles.py`)**:
+     - 기존에 `entry_bought: true` 상태인 종목을 스캐너가 `continue`로 건너뛰어 보고서에서 통째로 빠져 0개로 표시되던 결함 수정
+     - 활성 기준봉 파라미터는 안전하게 유지(덮어쓰기 방지)하면서, `[보유 중]`(잔여비율 > 0) 또는 `[재매수 대기]`(5일선 매도 후 기준가 돌파 대기 중) 태그와 함께 현재가/고가/중심가/손절가를 09:07 텔레그램 보고서에 정상 포함
+     - 요약 헤더 카운트를 `(신규/갱신: N개 | 감시/보유 중: N개)`로 보정
+  3. **한국 표준시(KST, UTC+9) 고정 적용 (`scan_ref_candles.py`, `Upbit_Anchor_Wave_Bot.py`)**:
+     - 리눅스 클라우드 서버의 기본 OS 타임존이 UTC(협정 세계시)로 설정되어 있어 텔레그램 메시지 및 로그의 스캔 일시가 9시간 느리게 표기되던 문제 해결
+     - 파이썬 내장 `datetime.timezone(datetime.timedelta(hours=9))`를 명시하여 서버 OS 타임존과 무관하게 항상 정확한 서울 실시간(KST)으로 일시가 계산 및 포맷팅되도록 보정
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **단위 테스트 3종 전원 통과 (`test_scan_ref_candles_fix.py`)**:
+    - `TARGET_TICKERS` 지정 시 거래대금 상위 API 미호출 확인 (PASS)
+    - `TARGET_TICKERS` 미지정(`[]`) 시 거래대금 상위 API 정상 호출 확인 (PASS)
+    - `bot_state.json`의 `KRW-NEAR(재매수 대기)` 및 `KRW-WAVES(보유 중)`가 09:07 보고서에 정상 출력 확인 (PASS)
+  - **기존 전략 단위 테스트 5종 전원 통과 (`test_strategy_order_and_once_a_day.py`)**: 5/5 통과
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
