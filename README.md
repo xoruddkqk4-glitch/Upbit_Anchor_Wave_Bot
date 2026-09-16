@@ -497,3 +497,19 @@
   - **고가 돌파 잔액 매수 단위 테스트 통과 (`test_breakout_scale_in.py`)**: NEAR 실데이터 모사 시 미투자 잔액 213,200원 전액 매수 ➔ 총 300,000원 풀포지션 완성 및 평단가/손절선 상향 검증 완료 (PASS)
   - **단계별 분할 익절 단위 테스트 4단계 전원 통과 (`test_tiered_tp.py`)**: +5% 시 25% 매도 ➔ +6% 시 중복 매도 방지 ➔ +10% 시 33% 매도 ➔ +15% 시 50% 매도 및 고가 돌파 연동 검증 완료 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료
+
+## 📝 [2026-09-17 08:42] 업데이트 이력 (Commit ID: 4a3b5ff)
+- **수정 내용** (부분 익절 시 목표 배정 총액 축소 조정 및 고가 돌파 재매수 방지 연동, 파일: `Upbit_Anchor_Wave_Bot.py`):
+  1. **부분 익절(단계별 익절 및 대칭 익절) 시 목표 배정 총액(`target_buy_amount`) 동적 축소 차감 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 5%, 10% 단계별 분할 익절(Tiered TP) 또는 대칭 익절 체결 시, 매도된 원금(`sold_cost = entry_price * sell_vol`)만큼 종목의 목표 배정액을 실시간 차감(`target_buy_amount = max(current_alloc - sold_cost, 0.0)`)
+     - **풀매수 후 익절 물량 고가 돌파 재매수 차단**: 30만 원 풀포지션 완료 후 5%, 10% 익절이 발생했을 때, 이후 기준봉 고가를 돌파하더라도 목표 배정액과 현재 보유액이 일치하여 미투자 잔액(`remaining_breakout_amount`)이 0원이 되므로 고점에서 익절한 물량을 되사는 모순 및 무한 루프 원천 방지
+     - **분할 매수 중 익절 시 미투자 잔액 정밀 연동**: 1차 매수(10만 원)만 진행된 상태에서 부분 익절이 발생한 후 고가 돌파 시, 익절된 원금을 제외하고 아직 투입하지 않았던 본래 미투자 잔액(20만 원)만 정확하게 추가 매수 집행
+  2. **상태 관리 및 하위 호환성 유지**:
+     - `bot_state.json`에 동적으로 축소된 `target_buy_amount`가 즉시 반영 및 저장되며, 신규 종목/재진입 시 `ORDER_AMOUNT_KRW`로 자동 정상화
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **시나리오 통합 단위 테스트 100% 통과 (`test_tp_and_breakout_sizing.py`)**:
+    - [시나리오 A] 30만원 풀매수 후 +5%, +10% 익절 ➔ 고가 돌파 시 재매수 시그널 0건 완벽 방어 확인 (PASS)
+    - [시나리오 B] 1차 10만원 매수 후 +5%, +10% 익절 ➔ 고가 돌파 시 미투자 잔액 20만원 정확히 추가 매수 및 최종 포지션 250,250원 수렴 확인 (PASS)
+  - **기존 단위 테스트 호환성 검증 통과**: `test_breakout_scale_in.py`, `test_tiered_tp.py` 전원 통과 (PASS)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)

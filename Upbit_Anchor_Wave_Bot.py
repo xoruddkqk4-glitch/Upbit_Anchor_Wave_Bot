@@ -1843,6 +1843,10 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
             sold_ratio = (sell_vol / state["total_volume"]) if state["total_volume"] > 0 else 0.0
             state["remaining_ratio"] = max(state["remaining_ratio"] - sold_ratio, 0.0)
+            # 부분 매도된 원금만큼 목표 배정 총액(target_buy_amount)을 축소 조정하여 익절 물량의 고가 돌파 재매수 방지
+            sold_cost = entry_price * sell_vol
+            current_alloc = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
+            state["target_buy_amount"] = max(current_alloc - sold_cost, 0.0)
             executed_tp_levels.append(target_gain)
 
             signals.append({
@@ -1984,6 +1988,10 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["remaining_ratio"] = (
               max(held_vol - sell_vol, 0.0) / state["total_volume"]
           )
+          # 대칭 익절된 원금만큼 목표 배정 총액(target_buy_amount)을 축소 조정하여 익절 물량의 고가 돌파 재매수 방지
+          sold_cost = entry_price * sell_vol
+          current_alloc = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
+          state["target_buy_amount"] = max(current_alloc - sold_cost, 0.0)
           buy_cost = entry_price * sell_vol
           realized_pnl, realized_return = calc_net_pnl(buy_cost, sell_amount)
           fill_note = build_partial_fill_note(target_vol, sell_vol)
