@@ -474,6 +474,26 @@
 - **검증 결과**:
   - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
   - **환경변수 모드 판정 검증**: `UPBIT_PAPER_TRADING=False` 시 실주문 모드(`True`), `True` 시 모의 모드(`False`) 정상 분기 확인
-  - **전략 단위 테스트 5종 전원 통과 (`test_strategy_order_and_once_a_day.py`)**: 5/5 통과
+  - 전략 단위 테스트 5종 전원 통과 (`test_strategy_order_and_once_a_day.py`): 5/5 통과
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료
 
+## 📝 [2026-09-17 08:23] 업데이트 이력 (Commit ID: 1510297)
+- **수정 내용** (고가 돌파 잔액 전액 매수 고도화 및 상승% 단계별 분할 익절 전략 탑재, 파일: `Upbit_Anchor_Wave_Bot.py`, `telegram_alert.py`, `.agents/`):
+  1. **기준봉 고가 돌파 잔액 전액 매수 로직 고도화 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 5일선 매도 후 재매수 등으로 `scale_in_count`가 이미 3회로 채워져 있더라도, 실제 투입 원금이 목표 배정 총액(`target_buy_amount`, 30만 원)에 미달하는 경우 기준봉 고가 상향 돌파 시 차액(`target_buy_amount - 현재투자금`)을 전액 매수하여 100% 풀포지션을 완성하도록 게이트 및 실행 조건 개선
+     - 보유 수량 가중 평균 평단가 계산 및 손절선 상향 재조정 연동
+     - 재매수 후 불필요한 눌림목 중복 과매수는 `can_scale_in` 가드로 철저히 차단
+  2. **상승률(%) 기반 사용자 정의 단계별 부분 매도(Tiered Take-Profit) 전략 탑재 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 사용자 편의성을 극대화하여 코드 상단에 직관적인 파이썬 변수로 차수별 1행 분리 선언 (`ENABLE_TIERED_TP = True`, `TIERED_TP_1_GAIN_PCT = 5`, `TIERED_TP_1_SELL_PCT = 25`, `TIERED_TP_2_GAIN_PCT = 10`, `TIERED_TP_2_SELL_PCT = 33` 등)
+     - 목표 수익률 도달 시 0.5% 슬리피지 보호형 시장가성 지정가(`sell_limit_with_slippage_protection`)로 안전하게 분할 매도
+     - `bot_state.json`에 `tiered_tp_executed_levels`를 영구 기록하여 5분 주기 반복 매도 완벽 방지
+     - 5일선 매도 후 재매수(`BUY (RE-ENTRY)`) 시 `tiered_tp_executed_levels = []` 자동 초기화로 새 랠리 익절 연동
+  3. **Windows cp949 인코딩 안전성 강화 (`telegram_alert.py`, `Upbit_Anchor_Wave_Bot.py`)**:
+     - 텔레그램 전송 실패 시 콘솔 출력에서 `UnicodeEncodeError` 방어 처리 (`try-except` 예외 처리 및 안전한 이모지 채택)
+  4. **`.agents` 워크스페이스 커스터마이제이션 적용 (`.agents/`)**:
+     - Antigravity 에이전트 실행 규칙 및 커스텀 스킬 세트(`.agents/rules/`, `.agents/skills/`) 동기화 및 `export_chat.py` 자체 완결성 확보
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py telegram_alert.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **고가 돌파 잔액 매수 단위 테스트 통과 (`test_breakout_scale_in.py`)**: NEAR 실데이터 모사 시 미투자 잔액 213,200원 전액 매수 ➔ 총 300,000원 풀포지션 완성 및 평단가/손절선 상향 검증 완료 (PASS)
+  - **단계별 분할 익절 단위 테스트 4단계 전원 통과 (`test_tiered_tp.py`)**: +5% 시 25% 매도 ➔ +6% 시 중복 매도 방지 ➔ +10% 시 33% 매도 ➔ +15% 시 50% 매도 및 고가 돌파 연동 검증 완료 (PASS)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료

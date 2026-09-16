@@ -23,7 +23,7 @@ date '+%Y%m%d%H%M'
 
 ### 2. 대화 txt 생성
 ```bash
-python .claude/skills/save-djt/export_chat.py <파일명>.txt
+python .agents/skills/save-djt/export_chat.py <파일명>.txt
 ```
 - 출력의 `SESSION_ID=...` 값을 보고에 사용합니다.
 - **종료 코드 2(세션 기록을 찾지 못함)** 이면 실패를 숨기지 말고, 사용자에게 알립니다.

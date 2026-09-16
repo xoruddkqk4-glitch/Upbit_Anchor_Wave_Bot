@@ -138,6 +138,44 @@ USE_PRICE_SYMMETRY_EXIT = True  # 1차 파동 높이 기반 가격 거리 대칭
 
 MIN_TAKE_PROFIT_PCT = 0.03  # 최소 보장 익절 수익률 (0.03 = +3%)
 
+# ─────────────────────────────────────
+# 단계별 수익률 분할 익절 (Tiered Take-Profit) 설정
+# ─────────────────────────────────────
+# 전체 기능 사용 여부 (False로 설정 시 단계별 익절 로직 완전 비활성화)
+ENABLE_TIERED_TP = True
+# 1차 익절: +5% 상승 시 잔여 수량의 25% 시장가성 지정가 매도 (0이면 미사용)
+TIERED_TP_1_GAIN_PCT = 5
+TIERED_TP_1_SELL_PCT = 25
+# 2차 익절: +10% 상승 시 잔여 수량의 33% 시장가성 지정가 매도 (0이면 미사용)
+TIERED_TP_2_GAIN_PCT = 10
+TIERED_TP_2_SELL_PCT = 33
+# 3차 익절: +15% 상승 시 잔여 수량의 50% 시장가성 지정가 매도 (0이면 미사용)
+TIERED_TP_3_GAIN_PCT = 15
+TIERED_TP_3_SELL_PCT = 50
+
+
+def get_active_tiered_tp_levels():
+  """활성화된 단계별 분할 익절 목록을 (상승비율, 매도비율, 상승%, 매도%) 오름차순 리스트로 반환"""
+  if not ENABLE_TIERED_TP:
+    return []
+  raw_steps = [
+      (TIERED_TP_1_GAIN_PCT, TIERED_TP_1_SELL_PCT),
+      (TIERED_TP_2_GAIN_PCT, TIERED_TP_2_SELL_PCT),
+      (TIERED_TP_3_GAIN_PCT, TIERED_TP_3_SELL_PCT),
+  ]
+  levels = []
+  for gain_pct, sell_pct in raw_steps:
+    if gain_pct > 0 and sell_pct > 0:
+      levels.append((
+          gain_pct / 100.0,
+          sell_pct / 100.0,
+          float(gain_pct),
+          float(sell_pct),
+      ))
+  levels.sort(key=lambda x: x[0])
+  return levels
+
+
 # 손절가 자동 설정
 STOP_LOSS_BASE = "LOW"  # 세력 마진노선인 기준봉 저가(Low) 기반 자동 손절[cite: 3]
 BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 진입 손절선 상한: 직전 확정봉 저가가 이보다 멀면 진입가 -5%로 제한 (전액 포지션 단일 최대 손실 통제)
@@ -1602,6 +1640,7 @@ def new_ticker_state():
       "ref_mid": 0.0,
       "rise_duration": 0,
       "wave_height": 0.0,
+      "tiered_tp_executed_levels": [],
   }
 
 
@@ -1779,7 +1818,67 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       entry_price = state["entry_price"]
       current_return = (curr_close - entry_price) / entry_price
 
-      # A. 대칭이론 익절 (2단계)
+      # A. 단계별 수익률 분할 익절 (Tiered Take-Profit)
+      #    사용자가 설정한 목표 수익률(예: +5%, +10%, +15%) 도달 시 그 시점 잔여 수량의 지정된 비율만큼 시장가성 지정가로 분할 매도
+      if ENABLE_TIERED_TP and state["remaining_ratio"] > 0:
+        active_tp_levels = get_active_tiered_tp_levels()
+        executed_tp_levels = state.setdefault("tiered_tp_executed_levels", [])
+        for target_gain, sell_ratio, gain_pct_num, sell_pct_num in active_tp_levels:
+          if current_return >= target_gain and target_gain not in executed_tp_levels:
+            if state["remaining_ratio"] <= 0:
+              break
+            current_holding_vol = state["total_volume"] * state["remaining_ratio"]
+            target_vol = current_holding_vol * sell_ratio
+            fill = execute_sell(
+                upbit_client, ticker, target_vol, curr_close, is_stop_loss=False
+            )
+            if not fill["ok"]:
+              continue
+            sell_vol = fill["volume"]
+            sell_price = fill["price"]
+            sell_amount = fill["amount"]
+            buy_cost = entry_price * sell_vol
+            realized_pnl, ret_pct = calc_net_pnl(buy_cost, sell_amount)
+            fill_note = build_partial_fill_note(target_vol, sell_vol)
+
+            sold_ratio = (sell_vol / state["total_volume"]) if state["total_volume"] > 0 else 0.0
+            state["remaining_ratio"] = max(state["remaining_ratio"] - sold_ratio, 0.0)
+            executed_tp_levels.append(target_gain)
+
+            signals.append({
+                "Ticker": ticker,
+                "Event": f"PARTIAL SELL (TIERED TP +{gain_pct_num:.0f}%)",
+                "Price": sell_price,
+                "Reason": f"목표 수익률 +{gain_pct_num:.0f}% 달성 -> 잔여의 {sell_pct_num:.0f}% 지정가 익절",
+            })
+
+            SendMessage(
+                f"<b>✨ [BST 봇] 단계별 부분 익절! (TIERED TP +{gain_pct_num:.0f}%)</b>\n"
+                f"• <b>종목</b>: {ticker}\n"
+                f"• <b>매도가</b>: {format_price(sell_price)}\n"
+                f"• <b>수익률</b>: <b>{ret_pct * 100:+.2f}%</b> (진입가 {format_price(entry_price)})\n"
+                f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b> (수수료 차감)\n"
+                f"• <b>매도 사유</b>: 평단가 대비 +{gain_pct_num:.0f}% 상승 확인 ➔ 잔여 수량의 {sell_pct_num:.0f}% 분할 익절 (잔여 비중: {state['remaining_ratio']*100:.1f}%)\n"
+                f"{fill_note}\n"
+                f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+            )
+
+            save_trade_to_google_sheet(
+                ticker=ticker,
+                trade_type="매도",
+                event_name=f"PARTIAL SELL (TIERED TP +{gain_pct_num:.0f}%)",
+                price=sell_price,
+                volume=sell_vol,
+                amount_krw=sell_amount,
+                entry_price=entry_price,
+                realized_pnl_krw=realized_pnl,
+                return_pct=ret_pct,
+                reason=(
+                    f"목표 수익률 +{gain_pct_num:.0f}% 도달 잔여의 {sell_pct_num:.0f}% 지정가 부분 매도"
+                ),
+            )
+
+      # B. 대칭이론 익절 (2단계)
       #    1차 파동(스윙 저점 -> 기준봉 고가)의 높이(wave_height)와 기간(rise_duration)을 2차 파동에 투영한다.
       #    [1단계] 기간 대칭: 2차 파동에 쓴 시간이 1차와 같아지면 에너지 소진 -> 잔여의 절반 익절.
       #            단, '기준봉 고가 위'(2차 상승 국면)에서 창(rise_duration ± 허용오차) 안일 때만.
@@ -2043,6 +2142,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         # 재매수 금액과 무관하게 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
         # (재매수 후 눌림목 조건에 다시 걸려 추가 분할 매수가 겹치는 과매수 경로 차단. 이후는 매도 로직만 동작)
         state["scale_in_count"] = target_scale_in_steps
+        state["tiered_tp_executed_levels"] = []
         triggered_base_price = state["base_price"]
         triggered_base_date = state.get("base_price_date")
         state["base_price"] = None
@@ -2100,13 +2200,26 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         )
 
     # [4. 진입 및 매수 체크] (allow_entry=False면 매도 감시만 수행하므로 전체 건너뜀)
+    is_holding = state.get("entry_bought", False) and state.get("remaining_ratio", 0) > 0
+    allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
+    current_invested = (
+        state["entry_price"] * (state["total_volume"] * state["remaining_ratio"])
+        if is_holding
+        else 0.0
+    )
+    # 목표 배정액 대비 미투자 잔여 금액 (최소 주문 금액 이상 남아있는지 확인)
+    remaining_breakout_amount = max(allocated_total - current_invested, 0.0)
+    can_breakout_add = is_holding and (remaining_breakout_amount >= MIN_BUY_AMOUNT_KRW)
+    can_scale_in = (
+        is_holding
+        and ENABLE_SCALE_IN_BUY
+        and (state.get("scale_in_count", 0) < target_scale_in_steps)
+    )
+
     if allow_entry and (
-        not state["entry_bought"]
-        or (
-            ENABLE_SCALE_IN_BUY
-            and state["scale_in_count"] < target_scale_in_steps
-            and state["remaining_ratio"] > 0
-        )
+        not is_holding
+        or can_scale_in
+        or can_breakout_add
     ):
       is_pullback = False
       if ENABLE_PULLBACK_ENTRY:
@@ -2251,31 +2364,26 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 ),
             )
 
-      # B. 눌림목 진입 후 3회차 미만에 도달해 있는 추가 매수 관리
-      elif (
-          state["entry_bought"]
-          and state["scale_in_count"] < target_scale_in_steps
-          and state["remaining_ratio"] > 0
-      ):
-        if is_breakout:
-          # 1) 눌림목 1~2회차 진행 중 실시간 고가 돌파 시: 남은 금액을 전액(한번에) 매수하여 배정 금액 채우고 손절가 상향 (실시간 5분 감시)
-          allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
-          remaining_steps = target_scale_in_steps - state["scale_in_count"]
-          remaining_amount = (
-              allocated_total / target_scale_in_steps
-          ) * remaining_steps
+      # B. 포지션 보유 중 추가 매수 관리 (고가 돌파 잔액 매수 또는 눌림목 분할 매수)
+      elif is_holding:
+        if is_breakout and can_breakout_add:
+          # 1) 실시간 고가 돌파 시: 목표 배정액(target_buy_amount) 대비 미투자 잔액을 전액 매수하여 100% 포지션 완성 및 손절선 상향 (실시간 5분 감시)
+          # (scale_in_count와 무관하게 실제 투자금이 배정액보다 부족하면 차액 전액 매수 집행)
+          remaining_amount = remaining_breakout_amount
           fill = execute_buy(upbit_client, ticker, remaining_amount, curr_close)
           if fill["ok"]:
             state["last_scale_in_date"] = curr_candle_date
             add_volume = fill["volume"]
-            old_volume = state["total_volume"]
+            curr_holding_vol = state["total_volume"] * state["remaining_ratio"]
+            new_total_vol = curr_holding_vol + add_volume
 
             state["entry_price"] = (
-                (state["entry_price"] * old_volume)
+                (state["entry_price"] * curr_holding_vol)
                 + (fill["price"] * add_volume)
-            ) / (old_volume + add_volume)
-            state["total_volume"] += add_volume
-            state["scale_in_count"] = target_scale_in_steps
+            ) / new_total_vol
+            state["total_volume"] = new_total_vol
+            state["remaining_ratio"] = 1.0  # 잔액 매수로 포지션 100% 정상화
+            state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
             prev_low = state["effective_ref_low"]
             # 손실 상한은 잔액 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
             new_stop, stop_basis = calc_breakout_stop(
@@ -2294,8 +2402,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 f"<b>🚀 [BST 봇] 고가 돌파 시그널! 남은 잔액 전액 매수 (BREAKOUT ALL-IN)</b>\n"
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
-                f"• <b>매수 잔액</b>: {fill['amount']:,.0f}원 (남은 금액 집행 ➔ 3/{target_scale_in_steps}차 완료)\n"
-                f"• <b>매수 사유</b>: 눌림목 진행 중 실시간 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 고가({format_price(ref_high)}) 상향 돌파 확인\n"
+                f"• <b>매수 잔액</b>: {fill['amount']:,.0f}원 (목표 배정액 {allocated_total:,.0f}원 중 잔액 집행 ➔ 100% 완료)\n"
+                f"• <b>매수 사유</b>: 실시간 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 고가({format_price(ref_high)}) 상향 돌파 확인\n"
                 f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
             )
@@ -2308,10 +2416,12 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 volume=add_volume,
                 amount_krw=fill["amount"],
                 entry_price=state["entry_price"],
-                reason="눌림목 진행 중 실시간 고가 돌파 잔액 전액 매수",
+                reason=(
+                    f"고가 돌파 미투자 잔액 전액 매수 (배정: {allocated_total:,.0f}원, 잔액: {fill['amount']:,.0f}원)"
+                ),
             )
 
-        elif is_pullback and can_pullback_today:
+        elif is_pullback and can_pullback_today and can_scale_in:
           # 2) 순수 추가 눌림목 조건 만족 시: 1/3 금액만큼 다음 회차 분할 매수 진행
           # (같은 확정봉 기준으로 하루 내내 조건이 유지되므로, 1일 1회로 제한해
           #  5분 주기마다 연속 체결되는 것을 방지)
@@ -2322,13 +2432,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           if fill["ok"]:
             state["scale_in_count"] += 1
             add_volume = fill["volume"]
-            old_volume = state["total_volume"]
+            curr_holding_vol = state["total_volume"] * state["remaining_ratio"]
+            new_total_vol = curr_holding_vol + add_volume
 
             state["entry_price"] = (
-                (state["entry_price"] * old_volume)
+                (state["entry_price"] * curr_holding_vol)
                 + (fill["price"] * add_volume)
-            ) / (old_volume + add_volume)
-            state["total_volume"] += add_volume
+            ) / new_total_vol
+            state["total_volume"] = new_total_vol
 
             signals.append({
                 "Ticker": ticker,

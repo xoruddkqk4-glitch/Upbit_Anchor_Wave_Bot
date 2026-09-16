@@ -51,5 +51,8 @@ def SendMessage(msg: str) -> bool:
         except requests.RequestException as e:
             print(f"[텔레그램] 발송 오류 ({attempt}/2회): {e}")
 
-    print(f"[텔레그램] 최종 실패, 메시지 손실: {msg}")
+    try:
+        print(f"[텔레그램] 최종 실패, 메시지 손실: {msg}")
+    except UnicodeEncodeError:
+        print(f"[텔레그램] 최종 실패, 메시지 손실: {msg.encode('ascii', 'replace').decode('ascii')}")
     return False

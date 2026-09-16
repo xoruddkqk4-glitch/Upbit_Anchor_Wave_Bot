@@ -47,6 +47,6 @@
 
 ## 7. `/save-djt` 세션 저장 및 재개 준비 정책 (Session Save & Resume)
 
-- `/save-djt` 수신 시: 대화 기록을 서울 시각 파일명(`YYYYMMDDHHmm.txt`)으로 내보내고(`.claude/skills/save-djt/export_chat.py`), 작업 트리(`git status`)를 점검하고, 재개 지점을 메모리 `resume-point.md`에 기록한 뒤 `claude -r <세션ID>` 재개 명령을 안내합니다.
+- `/save-djt` 수신 시: 대화 기록을 서울 시각 파일명(`YYYYMMDDHHmm.txt`)으로 내보내고(`.agents/skills/save-djt/export_chat.py`), 작업 트리(`git status`)를 점검하고, 재개 지점을 메모리 `resume-point.md`에 기록한 뒤 `claude -r <세션ID>` 재개 명령을 안내합니다.
 - 코드 수정·커밋·푸시 금지. `.gitignore`에 대화 파일 제외 패턴 추가만 허용.
-- 상세: `.claude/skills/save-djt/SKILL.md`
+- 상세: `.agents/skills/save-djt/SKILL.md`
