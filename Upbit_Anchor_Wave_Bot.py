@@ -150,8 +150,8 @@ TIERED_TP_1_SELL_PCT = 25
 TIERED_TP_2_GAIN_PCT = 10
 TIERED_TP_2_SELL_PCT = 33
 # 3차 익절: +15% 상승 시 잔여 수량의 50% 시장가성 지정가 매도 (0이면 미사용)
-TIERED_TP_3_GAIN_PCT = 15
-TIERED_TP_3_SELL_PCT = 50
+# TIERED_TP_3_GAIN_PCT = 15
+# TIERED_TP_3_SELL_PCT = 50
 
 
 def get_active_tiered_tp_levels():
@@ -161,7 +161,7 @@ def get_active_tiered_tp_levels():
   raw_steps = [
       (TIERED_TP_1_GAIN_PCT, TIERED_TP_1_SELL_PCT),
       (TIERED_TP_2_GAIN_PCT, TIERED_TP_2_SELL_PCT),
-      (TIERED_TP_3_GAIN_PCT, TIERED_TP_3_SELL_PCT),
+      # (TIERED_TP_3_GAIN_PCT, TIERED_TP_3_SELL_PCT),
   ]
   levels = []
   for gain_pct, sell_pct in raw_steps:

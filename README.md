@@ -498,7 +498,7 @@
   - **단계별 분할 익절 단위 테스트 4단계 전원 통과 (`test_tiered_tp.py`)**: +5% 시 25% 매도 ➔ +6% 시 중복 매도 방지 ➔ +10% 시 33% 매도 ➔ +15% 시 50% 매도 및 고가 돌파 연동 검증 완료 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료
 
-## 📝 [2026-09-17 08:42] 업데이트 이력 (Commit ID: 4a3b5ff)
+## 📝 [2026-09-17 08:42] 업데이트 이력 (Commit ID: 21c905c)
 - **수정 내용** (부분 익절 시 목표 배정 총액 축소 조정 및 고가 돌파 재매수 방지 연동, 파일: `Upbit_Anchor_Wave_Bot.py`):
   1. **부분 익절(단계별 익절 및 대칭 익절) 시 목표 배정 총액(`target_buy_amount`) 동적 축소 차감 (`Upbit_Anchor_Wave_Bot.py`)**:
      - 5%, 10% 단계별 분할 익절(Tiered TP) 또는 대칭 익절 체결 시, 매도된 원금(`sold_cost = entry_price * sell_vol`)만큼 종목의 목표 배정액을 실시간 차감(`target_buy_amount = max(current_alloc - sold_cost, 0.0)`)
@@ -513,3 +513,15 @@
     - [시나리오 B] 1차 10만원 매수 후 +5%, +10% 익절 ➔ 고가 돌파 시 미투자 잔액 20만원 정확히 추가 매수 및 최종 포지션 250,250원 수렴 확인 (PASS)
   - **기존 단위 테스트 호환성 검증 통과**: `test_breakout_scale_in.py`, `test_tiered_tp.py` 전원 통과 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+## 📝 [2026-09-17 08:48] 업데이트 이력 (Commit ID: 0a5d52f)
+- **수정 내용** (단계별 분할 익절 3차(+15%) 비활성화 및 2단계 분할 익절 최적화, 파일: `Upbit_Anchor_Wave_Bot.py`):
+  1. **3차 분할 익절(+15% 시 50% 매도) 주석 처리 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - `TIERED_TP_3_GAIN_PCT = 15` 및 `TIERED_TP_3_SELL_PCT = 50` 설정을 비활성화(주석 처리)하고, `get_active_tiered_tp_levels()`의 `raw_steps` 목록에서도 제외
+     - 이에 따라 분할 익절 엔진은 **1차(+5% 시 25% 익절)** 및 **2차(+10% 시 33% 익절)**의 2단계로만 동작하며, 이후 잔여 물량은 기존 전략대로 대칭 익절 및 5일선 추세 매도(MA5 DOWN)에 따라 최대 수익률을 추종하도록 설정 최적화
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **활성 익절 레벨 확인**: `get_active_tiered_tp_levels()` 실행 시 `[(0.05, 0.25), (0.1, 0.33)]` 2단계만 정확히 로드됨을 확인
+  - **시나리오 통합 단위 테스트 100% 통과 (`test_tp_and_breakout_sizing.py`)**: 시나리오 A, B 모두 정상 통과 (PASS)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
