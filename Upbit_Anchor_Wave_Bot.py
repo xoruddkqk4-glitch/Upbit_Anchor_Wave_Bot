@@ -180,12 +180,12 @@ def get_active_tiered_tp_levels():
 STOP_LOSS_BASE = "LOW"  # 세력 마진노선인 기준봉 저가(Low) 기반 자동 손절[cite: 3]
 BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 진입 손절선 상한: 직전 확정봉 저가가 이보다 멀면 진입가 -5%로 제한 (전액 포지션 단일 최대 손실 통제)
 
-# 주문 금액 및 시스템 설정 (종목당 최대 매수 금액 설정)
-MAX_BUY_AMOUNT_KRW = 300000  # 종목당 최대 매수 실행 금액 (원 단위: B안 30만원 = 300,000원)
+# 주문 금액 및 시스템 설정 (종목당 최대 매수 금액 설정: 총 자산 500만 원 기준)
+MAX_BUY_AMOUNT_KRW = 500000  # 종목당 최대 매수 실행 금액 (원 단위: 50만원 = 500,000원)
 ORDER_AMOUNT_KRW = MAX_BUY_AMOUNT_KRW  # 종목당 총 매수 실행 금액
 MIN_BUY_AMOUNT_KRW = 5000  # 업비트 KRW 마켓 최소 주문 가능 금액 (5,000원)
 ENABLE_VOLATILITY_SIZING = True  # 손절폭 기반 변동성 가중 사이징(Risk Parity) 활성화 여부
-MAX_LOSS_PER_TRADE_KRW = 25000  # 1회 손절 시 허용 최대 손실금 (원 단위: B안 2.5만 원)
+MAX_LOSS_PER_TRADE_KRW = 50000  # 1회 손절 시 허용 최대 손실금 (원 단위: 5만 원, 총 자산 500만원 대비 1.0% 리스크 제어)
 ENABLE_MA5_EXIT_BUFFER = True  # 5일선 꺾임 매도 시 장중 휩소 방지 버퍼 활성화 여부
 MA5_EXIT_BUFFER_PCT = 0.005  # 5일선 하향 이탈 허용 버퍼 (0.005 = 0.5% 이상 실질 하향 이탈 시에만 매도)
 MAX_OPEN_POSITIONS = 20  # 동시 보유 종목 수 상한 (20개 전 종목 제한 없이 동시 매수 허용)
