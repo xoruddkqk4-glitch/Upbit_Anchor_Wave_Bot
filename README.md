@@ -514,7 +514,7 @@
   - **기존 단위 테스트 호환성 검증 통과**: `test_breakout_scale_in.py`, `test_tiered_tp.py` 전원 통과 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
-## 📝 [2026-09-17 08:48] 업데이트 이력 (Commit ID: 0a5d52f)
+## 📝 [2026-09-17 08:48] 업데이트 이력 (Commit ID: 76876b6)
 - **수정 내용** (단계별 분할 익절 3차(+15%) 비활성화 및 2단계 분할 익절 최적화, 파일: `Upbit_Anchor_Wave_Bot.py`):
   1. **3차 분할 익절(+15% 시 50% 매도) 주석 처리 (`Upbit_Anchor_Wave_Bot.py`)**:
      - `TIERED_TP_3_GAIN_PCT = 15` 및 `TIERED_TP_3_SELL_PCT = 50` 설정을 비활성화(주석 처리)하고, `get_active_tiered_tp_levels()`의 `raw_steps` 목록에서도 제외
@@ -524,4 +524,22 @@
   - **활성 익절 레벨 확인**: `get_active_tiered_tp_levels()` 실행 시 `[(0.05, 0.25), (0.1, 0.33)]` 2단계만 정확히 로드됨을 확인
   - **시나리오 통합 단위 테스트 100% 통과 (`test_tp_and_breakout_sizing.py`)**: 시나리오 A, B 모두 정상 통과 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+## 📝 [2026-09-18 14:11] 업데이트 이력 (Commit ID: 9f9e2fd)
+- **수정 내용** (기준봉 사후 손절선 이탈 시 영구 무효화 및 과거 일봉 재탐색 방지, 파일: `scan_ref_candles.py`, `Upbit_Anchor_Wave_Bot.py`):
+  1. **기준봉 사후 손절선 훼손 검증 추가 (`scan_ref_candles.py`)**:
+     - 마감 확정 일봉(`closed_df`)에서 기준봉 후보(`latest_ref_idx`) 추출 시, 기준봉 다음 날부터 어제 확정봉까지의 구간에서 단 하루라도 저가가 손절가(`effective_ref_low`) 미만으로 하락한 적이 있는지 검증(`broken_in_history`)
+     - 손절선 훼손 이력 확인 시 `[손절선 기이탈 무효화]` 로그 출력 후 이전 과거 일봉은 재탐색하지 않고 즉시 영구 무효화(`active_ref_date = None`) 확정 및 스킵
+     - 기존 `bot_state.json`에 등록되어 있던 감시 종목도 사후 저점 이탈 확인 시 감시 해제하도록 보강
+  2. **5분 트레이딩 봇의 기준봉 재탐색 및 상태 정비 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 5분 주기 모니터링 시 신규 기준봉 탐색 과정에서 스캐너와 동일하게 사후 손절선 이탈 이력 검증 적용
+     - 장중 가격이 일시적으로 손절가 위로 반등하더라도 과거에 손절선이 붕괴되었던 기준봉이 되살아나 눌림목 매수가 격발되는 논리적 맹점 원천 차단
+     - 미보유 상태에서 손절선을 깬 기준봉 감시 해제 및 상태 초기화(`new_ticker_state()`) 보강
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **실제 업비트 일봉 데이터 기반 무효화 재현 검증 통과**:
+    - WLD 2026-09-07 기준봉(손절가 555.0원)에 대해 2026-09-15 저점(486.0원)의 손절선 이탈을 정확히 포착 (`broken_in_history: True` 확인)
+    - 장중 557원 반등에도 기준봉 채택 차단 및 매수 시그널 미격발 정상 동작 확인
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
 

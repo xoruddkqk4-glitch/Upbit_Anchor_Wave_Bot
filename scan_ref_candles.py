@@ -403,7 +403,32 @@ def _scan_all_reference_candles_locked():
                 swing_low_price = float(df["low"].iloc[lookback_start : ref_pos + 1].min())
                 wave_height = ref_high - swing_low_price
 
-                # [사전 필터링] 현재가가 손절가(기준봉 저가) 이하로 이미 이탈한 무효화된 기준봉은 해제 후 패스
+                # [사전 필터링 1] 기준봉 형성 이후 마감 확정봉들 중 저가가 손절선(저가)을 이탈한 적이 있는지 검증 (과거 이탈 영구 무효화)
+                # 기준봉이 한 번이라도 손절가를 깼다면 해당 지지 구조는 이미 붕괴된 것이며, 이전 일봉은 확인할 필요 없이 즉시 영구 무효화
+                closed_subsequent = closed_df.iloc[ref_pos + 1 :]
+                broken_in_history = False
+                broken_date_str = ""
+                broken_low_val = 0.0
+
+                if not closed_subsequent.empty:
+                    subsequent_min_low = float(closed_subsequent["low"].min())
+                    if subsequent_min_low < effective_ref_low:
+                        broken_in_history = True
+                        broken_idx = closed_subsequent["low"].idxmin()
+                        broken_date_str = broken_idx.strftime("%Y-%m-%d")
+                        broken_low_val = subsequent_min_low
+
+                if broken_in_history:
+                    print(
+                        f"  [손절선 기이탈 무효화] {ticker} -> 기준일: {ref_date_str} |"
+                        f" 사후 저점({broken_date_str}, {format_price(broken_low_val)}) < 손절가({format_price(effective_ref_low)})"
+                        " (손절선 파괴로 기준봉 영구 무효화 -> 진입 제외)"
+                    )
+                    if not state["entry_bought"]:
+                        state["active_ref_date"] = None
+                    continue
+
+                # [사전 필터링 2] 현재가가 손절가(기준봉 저가) 이하로 이미 이탈한 무효화된 기준봉은 해제 후 패스
                 if curr_close < effective_ref_low:
                     print(
                         f"  [손절선 이탈 무시] {ticker} -> 기준일: {ref_date_str} |"
@@ -460,10 +485,22 @@ def _scan_all_reference_candles_locked():
                 ref_high = state.get("ref_high", 0.0)
 
                 if active_ref_date and effective_ref_low > 0:
-                    # 봇과 동일한 만료 기준. 스캐너가 해제하지 않으면 봇이 만료시킨 기준봉을
-                    # 매일 09:07 재등록 -> 봇이 다시 만료시키는 순환이 생기므로 여기서도 해제한다.
                     ref_age_days = (df.index[-1] - pd.Timestamp(active_ref_date)).days
-                    if ref_age_days >= REF_EXPIRY_DAYS:
+                    ref_ts = pd.Timestamp(active_ref_date)
+                    is_broken = False
+                    if ref_ts in df.index:
+                        pos = df.index.get_loc(ref_ts)
+                        sub_closed = closed_df.iloc[pos + 1 :]
+                        if not sub_closed.empty and float(sub_closed["low"].min()) < effective_ref_low:
+                            is_broken = True
+
+                    if is_broken:
+                        if not state["entry_bought"]:
+                            print(
+                                f"  [손절선 기이탈 무효화] {ticker} -> 기준일: {active_ref_date} 사후 손절선 이탈 확인 감시 해제"
+                            )
+                            state["active_ref_date"] = None
+                    elif ref_age_days >= REF_EXPIRY_DAYS:
                         if not state["entry_bought"]:
                             print(
                                 f"  [기준봉 만료] {ticker} -> 기준일: {active_ref_date} ({ref_age_days}일 경과"
