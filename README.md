@@ -581,6 +581,36 @@
     - [테스트 4] 장중 가격 1,135원 하락 시 트레일링 스탑 전량 청산 신호 정상 격발 확인 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-19 18:56] 업데이트 이력 (Commit ID: 6fafc04)
+- **수정 내용** (기준봉 고가 위 매도 후 생명주기 정리, 고점 손절/지지선 확정, 신규 기준봉 우선 갱신 및 재매수 15일 유효기간 가드 적용, 파일: `Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`):
+  1. **고가 위 5일선 매도 시 기준봉 역할 전환 및 중심가 무효화 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 5일선 하향 이탈(`SELL (MA5 DOWN)`)로 잔여 수량이 0이 되었을 때 `entry_bought = False`로 설정하여 실보유 상태 해제
+     - 고가 돌파 이력이 있는 경우(`breakout_date` 존재 또는 매도가 >= `ref_high`):
+       - 손절 마진노선을 **기준봉 고가(`ref_high`)**로 승격 확정 (`state["effective_ref_low"] = max(effective_ref_low, ref_high)`)
+       - 기준봉 중심가(`ref_mid`) 및 눌림목 데이터를 `0.0`으로 무효화하여 과거 기준봉 재진입 차단
+  2. **미보유/재매수 대기 모드에서 최신 기준봉 우선권 보장 (New Anchor Priority)**:
+     - 잔여 포지션이 없는 종목(`remaining_ratio == 0`)에서 기존 기준봉보다 최신 일자의 기준봉 포착 시 기존 재매수 대기(`base_price`)를 취소하고 신규 기준봉 정보로 전면 자동 갱신
+     - 텔레그램 `[BST 봇] 신규 기준봉 전환` 알림 발송
+  3. **재매수 대기 즉시 초기화 완화 및 15일 유효기간 가드 적용 (`REENTRY_EXPIRY_DAYS = 15`)**:
+     - 주가가 고가 아래로 일시 하락하더라도 휩소/개미털기 방어를 위해 `base_price`를 즉시 삭제하지 않고 15일 동안 유지
+     - 주가가 하락하는 동안에는 `현재가 > base_price` 조건 미충족으로 절대 매수하지 않으므로 현금 100% 안전 보장
+     - 매도일로부터 15일(`REENTRY_EXPIRY_DAYS`) 동안 재돌파를 대기하며, 15일 경과 시에만 `[재매수 대기 만료 (15일 경과)]` 알림과 함께 상태 완전 초기화
+  4. **재매수 대기 중 오진입 방지 가드**:
+     - `base_price`가 대기 중인 동안에는 일반 신규 진입(눌림목/돌파)을 차단하고, 오직 `[3. 재매수 체크]`(`현재가 > base_price and 5일선 우상향`)만 평가하도록 가드 적용
+     - 재매수 체결 시 손절선을 기준봉 고가 또는 직전 확정봉 저가로 타이트하게 방어
+  5. **09:07 스캐너 연동 개선 (`scan_ref_candles.py`)**:
+     - `REENTRY_EXPIRY_DAYS = 15` 상수 동기화
+     - 실제 잔여 수량이 있는 보유 종목(`remaining_ratio > 0`)만 스캔을 스킵하고, 잔여 수량이 0인 "재매수 대기" 종목은 스캔을 계속 진행하여 신규 기준봉 발생 시 즉시 감지 및 갱신되도록 변경
+     - 재매수 대기 종목은 15일 이내라면 주가 하락 여부와 무관하게 `[재매수 대기]` 태그와 함께 유효 일수(`유효 N/15일`)를 09:07 보고서에 정상 보고
+     - 15일 경과 시에만 `[재매수 대기 만료]`로 상태 해제
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **시뮬레이션 단위 테스트 통과 (`scratch/test_logic.py`)**:
+    - [테스트 1] 고가 위 5일선 매도 시 `effective_ref_low` 고가 승격, `ref_mid = 0.0` 무효화, 보유 수량 0 집계 정상 확인 (PASS)
+    - [테스트 2] 고가 아래 하락 시 15일 이내 `base_price` 정상 보존 확인 (PASS)
+    - [테스트 3] 15일 초과 경과 시 `REENTRY_EXPIRY_DAYS` 만료 조건 정상 동작 확인 (PASS)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
 
 
 

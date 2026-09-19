@@ -112,6 +112,7 @@ REF_MIN_CHANGE_PCT = (
     0.10  # 기준봉 최소 상승률 (0.10 = 10% 이상 장대양봉)[cite: 3]
 )
 REF_EXPIRY_DAYS = 20  # 기준봉 유효기간(일). 20일 고가 돌파로 정의된 봉이 자기 룩백 창 밖으로 밀리는 시점. 보유 수량 없으면 감시 해제 (scan_ref_candles.py와 동일 값 유지)
+REENTRY_EXPIRY_DAYS = 15  # 5일선 매도 후 재매수 대기 유효기간(일). 15일 동안 매도가 재돌파 미발생 시 대기 해제
 
 # 매수(진입) 전략 파라미터
 ENABLE_PULLBACK_ENTRY = True  # 눌림목 매수 전략 활성화 (중심가 이하 진입)[cite: 3]
@@ -1690,8 +1691,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
   confirmed_low = confirmed_row["low"]
   confirmed_candle_date = confirmed_row.name.strftime("%Y-%m-%d")
 
-  # 1. 활성 기준봉이 없는 경우: 신규 기준봉 탐색
-  if not state["active_ref_date"]:
+  # 1. 활성 기준봉 탐색 (미보유 상태 또는 재매수 대기 상태에서 신규/최신 기준봉 탐색)
+  is_holding = state.get("entry_bought", False) and state.get("remaining_ratio", 0) > 0
+  if not is_holding:
     # 마감 확정봉만 탐지(진행 중 마지막 봉 제외: 장중 값이 스냅샷으로 굳는 문제 차단)
     # + 유효기간(REF_EXPIRY_DAYS) 내 기준봉만 후보로 인정 (등록 즉시 만료되는 순환 방지)
     closed_df = df.iloc[:-1]
@@ -1702,57 +1704,85 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
     ]
     if ref_indices:
       latest_ref_idx = ref_indices[-1]
-      ref_row = df.loc[latest_ref_idx]
-      ref_pos = df.index.get_loc(latest_ref_idx)
+      latest_ref_date_str = latest_ref_idx.strftime("%Y-%m-%d")
+      curr_active_ref = state.get("active_ref_date")
 
-      ref_high = ref_row["high"]
-      ref_low = ref_row["low"]
+      # 기준봉이 아직 없거나, 기존 기준봉보다 더 최근 날짜의 새로운 기준봉이 출현한 경우
+      if (not curr_active_ref) or (latest_ref_date_str > curr_active_ref):
+        ref_row = df.loc[latest_ref_idx]
+        ref_pos = df.index.get_loc(latest_ref_idx)
 
-      prev_close = (
-          df["close"].iloc[ref_pos - 1] if ref_pos > 0 else ref_row["open"]
-      )
-      has_gap_up = ref_row["open"] > prev_close
-      effective_ref_low = min(ref_low, prev_close) if has_gap_up else ref_low
-      ref_mid = effective_ref_low + (ref_high - effective_ref_low) * PULLBACK_RATIO
+        ref_high = ref_row["high"]
+        ref_low = ref_row["low"]
 
-      lookback_start = max(0, ref_pos - SWING_LOW_LOOKBACK_DAYS)
-      low_rel_pos = df["low"].iloc[lookback_start : ref_pos + 1].argmin()
-      rise_duration = (ref_pos - (lookback_start + low_rel_pos)) + 1
-      swing_low_price = df["low"].iloc[lookback_start : ref_pos + 1].min()
-      wave_height = ref_high - swing_low_price
-
-      # [사전 필터링 1] 기준봉 형성 이후 마감 확정봉들 중 저가가 손절선(저가)을 이탈한 적이 있는지 검증 (과거 이탈 영구 무효화)
-      # 기준봉이 한 번이라도 손절가를 깼다면 해당 지지 구조는 이미 붕괴된 것이며, 이전 일봉은 확인할 필요 없이 즉시 영구 무효화
-      closed_subsequent = closed_df.iloc[ref_pos + 1 :]
-      broken_in_history = False
-      broken_date_str = ""
-      broken_low_val = 0.0
-
-      if not closed_subsequent.empty:
-        subsequent_min_low = float(closed_subsequent["low"].min())
-        if subsequent_min_low < effective_ref_low:
-          broken_in_history = True
-          broken_idx = closed_subsequent["low"].idxmin()
-          broken_date_str = broken_idx.strftime("%Y-%m-%d")
-          broken_low_val = subsequent_min_low
-
-      if broken_in_history:
-        print(
-            f"[{ticker}] [손절선 기이탈 무효화] 기준일: {latest_ref_idx.strftime('%Y-%m-%d')} |"
-            f" 사후 저점({broken_date_str}, {format_price(broken_low_val)}) < 손절가({format_price(effective_ref_low)})"
-            " -> 과거 손절선 파괴로 기준봉 영구 무효화 (진입 제외)"
+        prev_close = (
+            df["close"].iloc[ref_pos - 1] if ref_pos > 0 else ref_row["open"]
         )
-      else:
-        state["active_ref_date"] = latest_ref_idx.strftime("%Y-%m-%d")
-        state["ref_high"] = ref_high
-        state["effective_ref_low"] = effective_ref_low
-        state["ref_mid"] = ref_mid
-        state["rise_duration"] = int(rise_duration)
-        state["wave_height"] = wave_height
-        print(
-            f"[{ticker}] [BST] 새로운 기준봉 포착! (기준일:"
-            f" {state['active_ref_date']})"
-        )
+        has_gap_up = ref_row["open"] > prev_close
+        effective_ref_low = min(ref_low, prev_close) if has_gap_up else ref_low
+        ref_mid = effective_ref_low + (ref_high - effective_ref_low) * PULLBACK_RATIO
+
+        lookback_start = max(0, ref_pos - SWING_LOW_LOOKBACK_DAYS)
+        low_rel_pos = df["low"].iloc[lookback_start : ref_pos + 1].argmin()
+        rise_duration = (ref_pos - (lookback_start + low_rel_pos)) + 1
+        swing_low_price = df["low"].iloc[lookback_start : ref_pos + 1].min()
+        wave_height = ref_high - swing_low_price
+
+        # [사전 필터링 1] 기준봉 형성 이후 마감 확정봉들 중 저가가 손절선(저가)을 이탈한 적이 있는지 검증 (과거 이탈 영구 무효화)
+        closed_subsequent = closed_df.iloc[ref_pos + 1 :]
+        broken_in_history = False
+        broken_date_str = ""
+        broken_low_val = 0.0
+
+        if not closed_subsequent.empty:
+          subsequent_min_low = float(closed_subsequent["low"].min())
+          if subsequent_min_low < effective_ref_low:
+            broken_in_history = True
+            broken_idx = closed_subsequent["low"].idxmin()
+            broken_date_str = broken_idx.strftime("%Y-%m-%d")
+            broken_low_val = subsequent_min_low
+
+        if broken_in_history:
+          print(
+              f"[{ticker}] [손절선 기이탈 무효화] 기준일: {latest_ref_date_str} |"
+              f" 사후 저점({broken_date_str}, {format_price(broken_low_val)}) < 손절가({format_price(effective_ref_low)})"
+              " -> 과거 손절선 파괴로 기준봉 영구 무효화 (진입 제외)"
+          )
+        else:
+          was_waiting = state.get("base_price") is not None
+          state["active_ref_date"] = latest_ref_date_str
+          state["ref_high"] = ref_high
+          state["effective_ref_low"] = effective_ref_low
+          state["ref_mid"] = ref_mid
+          state["rise_duration"] = int(rise_duration)
+          state["wave_height"] = wave_height
+          # 신규 기준봉 갱신 시 기존 재매수 대기 정보 및 돌파 상태 리셋
+          state["base_price"] = None
+          state["base_amount"] = None
+          state["base_price_date"] = None
+          state["breakout_date"] = None
+          state["scale_in_count"] = 0
+          state["last_scale_in_date"] = None
+          state["entry_bought"] = False
+          state["remaining_ratio"] = 1.0
+          state["tiered_tp_executed_levels"] = []
+
+          if was_waiting:
+            print(
+                f"[{ticker}] [BST] 재매수 대기 취소 및 최신 기준봉 갱신! (이전:"
+                f" {curr_active_ref} ➔ 최신: {latest_ref_date_str})"
+            )
+            SendMessage(
+                f"<b>🌟 [BST 봇] 신규 기준봉 전환</b>\n"
+                f"• <b>종목</b>: {ticker}\n"
+                f"• <b>내용</b>: 재매수 대기 중 최신 기준봉({latest_ref_date_str}) 발생 ➔ 신규 기준봉으로 자동 갱신\n"
+                f"• <b>가격대</b>: 고가 {format_price(ref_high)} | 중심가 {format_price(ref_mid)} | 손절가 {format_price(effective_ref_low)}"
+            )
+          else:
+            print(
+                f"[{ticker}] [BST] 새로운 기준봉 포착! (기준일:"
+                f" {state['active_ref_date']})"
+            )
 
   # 활성 기준봉이 있는 경우 5분 주기 실시간 모니터링 진행
   if state["active_ref_date"]:
@@ -1764,45 +1794,72 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
     # [기준봉 만료 및 손절선 기이탈 체크] 보유 수량이 없는 상태(미진입 또는 전량 청산 후 재매수 대기)
     is_holding = state["entry_bought"] and state["remaining_ratio"] > 0
+    is_waiting_reentry = state.get("base_price") is not None
+    base_calc_date = state.get("base_price_date") or state["active_ref_date"]
     ref_age_days = (
-        pd.Timestamp(curr_candle_date) - pd.Timestamp(state["active_ref_date"])
+        pd.Timestamp(curr_candle_date) - pd.Timestamp(base_calc_date)
     ).days
+
     if not is_holding:
-      # 미보유 상태에서 기준봉 이후 마감 확정봉 저가가 손절선(저가)을 이탈한 적이 있다면 즉시 감시 해제
-      ref_ts = pd.Timestamp(state["active_ref_date"])
-      is_broken = False
-      broken_date_str = ""
-      broken_low_val = 0.0
-      if ref_ts in df.index:
-        pos = df.index.get_loc(ref_ts)
-        sub_closed = df.iloc[:-1].iloc[pos + 1 :]
-        if not sub_closed.empty and float(sub_closed["low"].min()) < effective_ref_low:
+      if is_waiting_reentry:
+        # [재매수 대기 모드] 주가가 고가 아래로 일시 하락하더라도 휩소 방어를 위해 base_price를 즉시 해제하지 않고 유지.
+        # 가격이 하락하면 '현재가 > base_price' 조건 미충족으로 매수되지 않으므로 현금 안전.
+        # 유효기간(REENTRY_EXPIRY_DAYS, 15일) 동안 대기하며, 15일 경과 시에만 만료 초기화
+        if ref_age_days >= REENTRY_EXPIRY_DAYS:
+          print(
+              f"[{ticker}] [재매수 대기 만료] 매도일 {base_calc_date} ({ref_age_days}일 경과"
+              f" >= {REENTRY_EXPIRY_DAYS}일) -> 재매수 기준가({format_price(state['base_price'])}) 초기화"
+          )
+          SendMessage(
+              f"<b>⏳ [BST 봇] 재매수 대기 만료 (15일 경과)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>기준 매도가</b>: {format_price(state['base_price'])}\n"
+              f"• <b>경과 일수</b>: {ref_age_days}일 (유효기간 {REENTRY_EXPIRY_DAYS}일 초과)\n"
+              f"• <b>사유</b>: 유효기간 내 재돌파 또는 신규 기준봉 미발생 ➔ 대기 해제 및 상태 초기화"
+          )
+          global_state[ticker] = new_ticker_state()
+          return signals
+      else:
+        # [순수 미진입 종목] 기준봉 이후 저가가 손절가(기준봉 저가)를 이탈한 경우 즉시 감시 해제
+        ref_ts = pd.Timestamp(state["active_ref_date"])
+        is_broken = False
+        broken_date_str = ""
+        broken_low_val = 0.0
+        if ref_ts in df.index:
+          pos = df.index.get_loc(ref_ts)
+          sub_closed = df.iloc[:-1].iloc[pos + 1 :]
+          if not sub_closed.empty and float(sub_closed["low"].min()) < effective_ref_low:
+            is_broken = True
+            b_idx = sub_closed["low"].idxmin()
+            broken_date_str = b_idx.strftime("%Y-%m-%d")
+            broken_low_val = float(sub_closed["low"].min())
+
+        if not is_broken and curr_close < effective_ref_low:
           is_broken = True
-          b_idx = sub_closed["low"].idxmin()
-          broken_date_str = b_idx.strftime("%Y-%m-%d")
-          broken_low_val = float(sub_closed["low"].min())
+          broken_date_str = curr_candle_date
+          broken_low_val = curr_close
 
-      if is_broken:
-        print(
-            f"[{ticker}] [손절선 기이탈 감시 해제] 기준일 {state['active_ref_date']} 이후 저점({broken_date_str},"
-            f" {format_price(broken_low_val)}) < 손절가({format_price(effective_ref_low)}) 확인 -> 상태 초기화"
-        )
-        global_state[ticker] = new_ticker_state()
-        return signals
+        if is_broken:
+          print(
+              f"[{ticker}] [손절선 기이탈 감시 해제] 기준일 {state['active_ref_date']} 이후 저점({broken_date_str},"
+              f" {format_price(broken_low_val)}) < 손절가({format_price(effective_ref_low)}) 확인 -> 상태 초기화"
+          )
+          global_state[ticker] = new_ticker_state()
+          return signals
 
-      if ref_age_days >= REF_EXPIRY_DAYS:
-        print(
-            f"[{ticker}] [기준봉 만료] 기준일 {state['active_ref_date']} ({ref_age_days}일 경과"
-            f" >= {REF_EXPIRY_DAYS}일), 보유 없음 -> 감시 해제 및 상태 초기화"
-        )
-        SendMessage(
-            f"<b>⏳ [BST 봇] 기준봉 만료 (감시 해제)</b>\n"
-            f"• <b>종목</b>: {ticker}\n"
-            f"• <b>기준일</b>: {state['active_ref_date']} ({ref_age_days}일 경과 / 유효 {REF_EXPIRY_DAYS}일)\n"
-            f"• <b>사유</b>: 유효기간 내 진입(또는 재매수) 없음 -> 기준봉 및 재매수 기준가 초기화"
-        )
-        global_state[ticker] = new_ticker_state()
-        return signals
+        if ref_age_days >= REF_EXPIRY_DAYS:
+          print(
+              f"[{ticker}] [기준봉 만료] 기준일 {state['active_ref_date']} ({ref_age_days}일 경과"
+              f" >= {REF_EXPIRY_DAYS}일), 보유 없음 -> 감시 해제 및 상태 초기화"
+          )
+          SendMessage(
+              f"<b>⏳ [BST 봇] 기준봉 만료 (감시 해제)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>기준일</b>: {state['active_ref_date']} ({ref_age_days}일 경과 / 유효 {REF_EXPIRY_DAYS}일)\n"
+              f"• <b>사유</b>: 유효기간 내 진입 없음 -> 기준봉 감시 해제 및 상태 초기화"
+          )
+          global_state[ticker] = new_ticker_state()
+          return signals
 
     # [1-0. 고가 돌파 후 연속 양봉 저가 트레일링 스탑 (Trailing Stop)]
     # 고가 돌파 이후 연속 양봉이 지속되는 동안 확정된 최신 양봉의 저가로 손절선을 상향 갱신하여 수익 보전
@@ -2210,6 +2267,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["base_price"] = sell_price
             state["base_amount"] = sell_amount
             state["base_price_date"] = curr_candle_date
+            state["entry_bought"] = False
+            # 돌파가 발생했거나 매도가가 기준봉 고가 이상인 경우:
+            # 기준봉 중심가/눌림목 등 내부 정보는 소멸 처리하고, 손절/지지 마진노선은 기준봉 고가로 확정
+            had_breakout = bool(state.get("breakout_date")) or (sell_price >= ref_high)
+            if had_breakout:
+              state["effective_ref_low"] = max(state.get("effective_ref_low", 0.0), ref_high)
+              state["ref_mid"] = 0.0
 
           buffer_note = (
               f" (5일선 {format_price(curr_ma5)} 대비"
@@ -2280,6 +2344,12 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         state["total_volume"] = total_volume
         state["remaining_ratio"] = 1.0
         state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
+        # 돌파 후 재매수이므로 손절선은 기준봉 고가 또는 직전 확정봉 저가로 타이트하게 방어
+        state["effective_ref_low"] = max(
+            state.get("effective_ref_low", 0.0),
+            state.get("ref_high", 0.0),
+            confirmed_low,
+        )
         # 파동 기준점(wave_anchor_*)과 대칭 익절 플래그(symmetry_tp_executed)는 '파동' 단위 상태라 재매수로 갱신하지 않는다.
         # 재매수는 항상 이전 매도가보다 높게 되사므로, 기준점을 진입가로 옮기면 대칭 목표가 매번 위로 도망가
         # 원래 파동의 목표에 결코 도달하지 못한다. 구버전 상태(기준점 미기록)만 현재 진입값으로 백필.
@@ -2348,6 +2418,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
     # [4. 진입 및 매수 체크] (allow_entry=False면 매도 감시만 수행하므로 전체 건너뜀)
     is_holding = state.get("entry_bought", False) and state.get("remaining_ratio", 0) > 0
+    is_waiting_reentry = (state.get("base_price") is not None)
     allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
     current_invested = (
         state["entry_price"] * (state["total_volume"] * state["remaining_ratio"])
@@ -2363,7 +2434,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         and (state.get("scale_in_count", 0) < target_scale_in_steps)
     )
 
-    if allow_entry and (
+    if allow_entry and not is_waiting_reentry and (
         not is_holding
         or can_scale_in
         or can_breakout_add

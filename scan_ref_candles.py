@@ -31,6 +31,7 @@ REF_VOL_MULTIPLIER = 2.0    # 거래량 급증 배수 (200% 이상)
 REF_MIN_CHANGE_PCT = 0.10   # 기준봉 최소 상승률 (10% 이상 장대양봉)
 PULLBACK_RATIO = 0.5        # 눌림목 기준 비율 (0.5 = 중심가)
 REF_EXPIRY_DAYS = 20        # 기준봉 유효기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 만료<->재등록 순환 발생)
+REENTRY_EXPIRY_DAYS = 15    # 5일선 매도 후 재매수 대기 유효기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지
 PREV_HIGH_LOOKBACK_DAYS = 20  # 기준봉 판정용 전고점 룩백(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 봇·스캐너가 다른 기준봉 탐지)
 SWING_LOW_LOOKBACK_DAYS = 20  # 1차 파동 스윙 저점 탐색 기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지
 MAX_TARGET_COUNT = 20       # 스캔 대상 최대 코인 수
@@ -341,10 +342,10 @@ def _scan_all_reference_candles_locked():
 
             state = global_state[ticker]
 
-            # 2. 이미 매수 포지션 보유 중이거나 5일선 매도 후 재매수 대기 중인 코인은
-            # 기존 활성 기준봉 상태를 유지하며 09:07 보고서에 정상 포함 (스캔 건너뛰기 대신 보고)
-            if state.get("entry_bought", False):
-                tag = "보유 중" if state.get("remaining_ratio", 0) > 0 else "재매수 대기"
+            # 2. 이미 매수 포지션 보유 중인 코인은 기존 활성 기준봉 상태를 유지하며 09:07 보고서에 정상 포함
+            # (단, 잔여 수량이 0인 '재매수 대기' 코인은 최신 기준봉 발생 여부를 감지할 수 있도록 스캔을 진행)
+            if state.get("entry_bought", False) and state.get("remaining_ratio", 0) > 0:
+                tag = "보유 중"
                 ref_date_str = state.get("active_ref_date") or "미지정"
                 ref_high = state.get("ref_high", 0.0)
                 ref_mid = state.get("ref_mid", 0.0)
@@ -440,6 +441,15 @@ def _scan_all_reference_candles_locked():
                     continue
 
                 # 유효한 기준봉 업데이트
+                prev_ref_date = state.get("active_ref_date")
+                was_reentry_waiting = state.get("base_price") is not None
+                if was_reentry_waiting and prev_ref_date != ref_date_str:
+                    state["base_price"] = None
+                    state["base_amount"] = None
+                    state["base_price_date"] = None
+                    state["entry_bought"] = False
+                    state["breakout_date"] = None
+
                 state["active_ref_date"] = ref_date_str
                 state["ref_high"] = ref_high
                 state["effective_ref_low"] = effective_ref_low
@@ -483,49 +493,82 @@ def _scan_all_reference_candles_locked():
                 effective_ref_low = state.get("effective_ref_low", 0.0)
                 ref_mid = state.get("ref_mid", 0.0)
                 ref_high = state.get("ref_high", 0.0)
+                is_reentry_waiting = state.get("base_price") is not None
+                base_calc_date = state.get("base_price_date") or active_ref_date
 
-                if active_ref_date and effective_ref_low > 0:
-                    ref_age_days = (df.index[-1] - pd.Timestamp(active_ref_date)).days
-                    ref_ts = pd.Timestamp(active_ref_date)
-                    is_broken = False
-                    if ref_ts in df.index:
-                        pos = df.index.get_loc(ref_ts)
-                        sub_closed = closed_df.iloc[pos + 1 :]
-                        if not sub_closed.empty and float(sub_closed["low"].min()) < effective_ref_low:
+                if active_ref_date and (effective_ref_low > 0 or is_reentry_waiting):
+                    ref_age_days = (df.index[-1] - pd.Timestamp(base_calc_date)).days
+
+                    if is_reentry_waiting:
+                        # 재매수 대기 종목: 주가 하락에도 휩소 방어를 위해 유지, 15일 유효기간 경과 시에만 만료
+                        if ref_age_days >= REENTRY_EXPIRY_DAYS:
+                            print(
+                                f"  [재매수 대기 만료] {ticker} -> 매도일: {base_calc_date} ({ref_age_days}일 경과"
+                                f" >= {REENTRY_EXPIRY_DAYS}일) 대기 해제"
+                            )
+                            state["active_ref_date"] = None
+                            state["base_price"] = None
+                            state["base_amount"] = None
+                            state["base_price_date"] = None
+                        else:
+                            print(
+                                f"  [재매수 대기] {ticker} -> 기준일: {active_ref_date} | 매도가: {format_price(state['base_price'])} | 현재가: {format_price(curr_close)}"
+                                f" (유효 {ref_age_days}/{REENTRY_EXPIRY_DAYS}일)"
+                            )
+                            all_reported_candles.append({
+                                "ticker": ticker,
+                                "ref_date": active_ref_date,
+                                "tag": "재매수 대기",
+                                "curr_close": curr_close,
+                                "ref_high": ref_high,
+                                "ref_mid": ref_mid,
+                                "effective_ref_low": effective_ref_low,
+                            })
+                    else:
+                        # 순수 미진입 종목: 손절선 이탈 또는 만료 체크
+                        ref_ts = pd.Timestamp(active_ref_date)
+                        is_broken = False
+                        if ref_ts in df.index:
+                            pos = df.index.get_loc(ref_ts)
+                            sub_closed = closed_df.iloc[pos + 1 :]
+                            if not sub_closed.empty and float(sub_closed["low"].min()) < effective_ref_low:
+                                is_broken = True
+
+                        if not is_broken and curr_close < effective_ref_low:
                             is_broken = True
 
-                    if is_broken:
-                        if not state["entry_bought"]:
+                        if is_broken:
+                            if not state.get("entry_bought"):
+                                print(
+                                    f"  [손절선 기이탈 무효화] {ticker} -> 기준일: {active_ref_date} 사후 손절선 이탈 확인 감시 해제"
+                                )
+                                state["active_ref_date"] = None
+                        elif ref_age_days >= REF_EXPIRY_DAYS:
+                            if not state.get("entry_bought"):
+                                print(
+                                    f"  [기준봉 만료] {ticker} -> 기준일: {active_ref_date} ({ref_age_days}일 경과"
+                                    f" >= {REF_EXPIRY_DAYS}일) 감시 해제"
+                                )
+                                state["active_ref_date"] = None
+                        elif curr_close >= effective_ref_low:
                             print(
-                                f"  [손절선 기이탈 무효화] {ticker} -> 기준일: {active_ref_date} 사후 손절선 이탈 확인 감시 해제"
+                                f"  [감시 중] {ticker} -> 기준일: {active_ref_date} | 현재가: {format_price(curr_close)} |"
+                                f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
                             )
-                            state["active_ref_date"] = None
-                    elif ref_age_days >= REF_EXPIRY_DAYS:
-                        if not state["entry_bought"]:
-                            print(
-                                f"  [기준봉 만료] {ticker} -> 기준일: {active_ref_date} ({ref_age_days}일 경과"
-                                f" >= {REF_EXPIRY_DAYS}일) 감시 해제"
-                            )
-                            state["active_ref_date"] = None
-                    elif curr_close >= effective_ref_low:
-                        print(
-                            f"  [기존 감시 유지] {ticker} -> 기준일: {active_ref_date} | 현재가: {format_price(curr_close)} |"
-                            f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
-                        )
-                        all_reported_candles.append({
-                            "ticker": ticker,
-                            "ref_date": active_ref_date,
-                            "tag": "감시 중",
-                            "curr_close": curr_close,
-                            "ref_high": ref_high,
-                            "ref_mid": ref_mid,
-                            "effective_ref_low": effective_ref_low,
-                        })
-                    else:
-                        if not state["entry_bought"]:
-                            state["active_ref_date"] = None
+                            all_reported_candles.append({
+                                "ticker": ticker,
+                                "ref_date": active_ref_date,
+                                "tag": "감시 중",
+                                "curr_close": curr_close,
+                                "ref_high": ref_high,
+                                "ref_mid": ref_mid,
+                                "effective_ref_low": effective_ref_low,
+                            })
+                        else:
+                            if not state.get("entry_bought"):
+                                state["active_ref_date"] = None
                 else:
-                    if not state["entry_bought"]:
+                    if not state.get("entry_bought") and not is_reentry_waiting:
                         state["active_ref_date"] = None
 
             time.sleep(API_DELAY_SEC)
