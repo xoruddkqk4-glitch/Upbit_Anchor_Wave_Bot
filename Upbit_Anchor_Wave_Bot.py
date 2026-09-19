@@ -180,6 +180,12 @@ def get_active_tiered_tp_levels():
 STOP_LOSS_BASE = "LOW"  # 세력 마진노선인 기준봉 저가(Low) 기반 자동 손절[cite: 3]
 BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 진입 손절선 상한: 직전 확정봉 저가가 이보다 멀면 진입가 -5%로 제한 (전액 포지션 단일 최대 손실 통제)
 
+# ─────────────────────────────────────
+# 고가 돌파 후 연속 양봉 저가 트레일링 스탑 (Consecutive Bullish Trailing Stop)
+# ─────────────────────────────────────
+ENABLE_BREAKOUT_CONSECUTIVE_BULLISH_TRAILING = True  # 고가 돌파 후 연속 양봉 저가 트레일링 스탑 활성화 여부
+BREAKOUT_CONSECUTIVE_BULLISH_DAYS = 2  # 트레일링 발동 최소 연속 양봉 일수 (기본값: 2일 연속 양봉부터 최신 양봉 저가로 상향)
+
 # 주문 금액 및 시스템 설정 (종목당 최대 매수 금액 설정: 총 자산 500만 원 기준)
 MAX_BUY_AMOUNT_KRW = 500000  # 종목당 최대 매수 실행 금액 (원 단위: 50만원 = 500,000원)
 ORDER_AMOUNT_KRW = MAX_BUY_AMOUNT_KRW  # 종목당 총 매수 실행 금액
@@ -1641,6 +1647,8 @@ def new_ticker_state():
       "rise_duration": 0,
       "wave_height": 0.0,
       "tiered_tp_executed_levels": [],
+      "breakout_date": None,
+      "last_trailing_stop_date": None,
   }
 
 
@@ -1796,7 +1804,73 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         global_state[ticker] = new_ticker_state()
         return signals
 
-    # [손절 체크] 기준봉 저가(마진노선) 이탈 시 데이터 초기화
+    # [1-0. 고가 돌파 후 연속 양봉 저가 트레일링 스탑 (Trailing Stop)]
+    # 고가 돌파 이후 연속 양봉이 지속되는 동안 확정된 최신 양봉의 저가로 손절선을 상향 갱신하여 수익 보전
+    if is_holding and ENABLE_BREAKOUT_CONSECUTIVE_BULLISH_TRAILING:
+      # 돌파 발생일 감지 및 보정 (미기록 포지션 호환)
+      if not state.get("breakout_date"):
+        if curr_close > ref_high:
+          state["breakout_date"] = curr_candle_date
+        elif state.get("active_ref_date"):
+          ref_ts = pd.Timestamp(state["active_ref_date"])
+          post_ref = df.loc[df.index > ref_ts].iloc[:-1]
+          bo_candles = post_ref[post_ref["close"] > ref_high]
+          if bo_candles.empty:
+            bo_candles = post_ref[post_ref["high"] > ref_high]
+          if not bo_candles.empty:
+            state["breakout_date"] = bo_candles.index[0].strftime("%Y-%m-%d")
+
+      if state.get("breakout_date"):
+        bo_ts = pd.Timestamp(state["breakout_date"])
+        confirmed_since_bo = df.loc[df.index >= bo_ts].iloc[:-1]
+        consecutive_bullish_count = 0
+        latest_bullish_low = None
+        latest_bullish_date = None
+
+        for c_idx, c_row in confirmed_since_bo.iterrows():
+          if c_row["close"] > c_row["open"]:
+            consecutive_bullish_count += 1
+            latest_bullish_low = float(c_row["low"])
+            latest_bullish_date = c_idx.strftime("%Y-%m-%d")
+          else:
+            break
+
+        if (
+            consecutive_bullish_count >= BREAKOUT_CONSECUTIVE_BULLISH_DAYS
+            and latest_bullish_low is not None
+        ):
+          if latest_bullish_low > effective_ref_low:
+            old_stop = effective_ref_low
+            effective_ref_low = latest_bullish_low
+            state["effective_ref_low"] = latest_bullish_low
+
+            if state.get("last_trailing_stop_date") != latest_bullish_date:
+              state["last_trailing_stop_date"] = latest_bullish_date
+              print(
+                  f"[{ticker}] [트레일링 스탑 상향] 고가 돌파 후 {consecutive_bullish_count}일 연속 양봉 확인"
+                  f" -> 손절선 상향: {format_price(old_stop)} ➔ {format_price(latest_bullish_low)}"
+                  f" ({latest_bullish_date} 확정 양봉 저가)"
+              )
+              signals.append({
+                  "Ticker": ticker,
+                  "Event": "TRAILING STOP ADJUSTED",
+                  "Old_Stop": old_stop,
+                  "New_Stop": latest_bullish_low,
+                  "Reason": (
+                      f"고가 돌파 후 {consecutive_bullish_count}일 연속 양봉"
+                      f" -> {latest_bullish_date} 확정 양봉 저가로 상향"
+                  ),
+              })
+              SendMessage(
+                  f"<b>🚀 [BST 봇] 고가 돌파 후 {consecutive_bullish_count}일 연속 양봉! 손절선 상향 (TRAILING STOP)</b>\n"
+                  f"• <b>종목</b>: {ticker}\n"
+                  f"• <b>손절선 상향</b>: {format_price(old_stop)} ➔ <b>{format_price(latest_bullish_low)}</b>\n"
+                  f"• <b>적용 기준</b>: {latest_bullish_date} 확정 양봉 저가 (연속 {consecutive_bullish_count}일 양봉)\n"
+                  f"• <b>사유</b>: 기준봉 고가 돌파 후 강력한 상승 랠리 지속 ➔ 단기 급락 방어 및 수익 보전\n"
+                  f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+              )
+
+    # [손절 체크] 기준봉 저가(마진노선 또는 상향된 트레일링 스탑선) 이탈 시 데이터 초기화
     if curr_close < effective_ref_low:
       if state["remaining_ratio"] > 0 and state["entry_bought"]:
         target_vol = state["total_volume"] * state["remaining_ratio"]
@@ -1814,20 +1888,41 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         realized_pnl, ret_pct = calc_net_pnl(buy_cost, sell_amount)
         fill_note = build_partial_fill_note(target_vol, sell_vol)
 
+        is_trailing_stop = state.get("last_trailing_stop_date") is not None
+        is_profit_exit = sell_price > state["entry_price"]
+        event_name = (
+            "SELL (TRAILING STOP)" if is_trailing_stop else "SELL (STOP LOSS)"
+        )
+        title = (
+            "🎯 [BST 봇] 트레일링 스탑 익절! (TRAILING STOP)"
+            if (is_trailing_stop and is_profit_exit)
+            else "🔴 [BST 봇] 시장가 손절 매도! (STOP LOSS)"
+        )
+        reason_desc = (
+            f"현재가({format_price(curr_close)})가 트레일링 스탑선({format_price(effective_ref_low)}) 하향 이탈 ➔ 전량 시장가 청산"
+            if is_trailing_stop
+            else f"현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 손절 마진노선({format_price(effective_ref_low)}) 하향 이탈 ➔ 전량 시장가 손절"
+        )
+        sheet_reason = (
+            f"트레일링 스탑선({format_price(effective_ref_low)}) 하향 이탈 전량 청산"
+            if is_trailing_stop
+            else f"기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 전량 손절"
+        )
+
         signals.append({
             "Ticker": ticker,
-            "Event": "SELL (STOP LOSS)",
+            "Event": event_name,
             "Price": sell_price,
-            "Reason": "기준봉 손절가(마진노선) 이탈 -> 시장가 전량 손절 및 데이터 초기화",
+            "Reason": reason_desc,
         })
 
-        # 텔레그램 손절 매도 알림
+        # 텔레그램 매도 알림
         SendMessage(
-            f"<b>🔴 [BST 봇] 시장가 손절 매도! (STOP LOSS)</b>\n"
+            f"<b>{title}</b>\n"
             f"• <b>종목</b>: {ticker}\n"
             f"• <b>매도가</b>: {format_price(sell_price)}\n"
             f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
-            f"• <b>매도 사유</b>: 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 손절 마진노선({format_price(effective_ref_low)}) 하향 이탈 ➔ 전량 시장가 손절"
+            f"• <b>매도 사유</b>: {reason_desc}\n"
             f"{fill_note}\n"
             f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
         )
@@ -1835,14 +1930,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         save_trade_to_google_sheet(
             ticker=ticker,
             trade_type="매도",
-            event_name="SELL (STOP LOSS)",
+            event_name=event_name,
             price=sell_price,
             volume=sell_vol,
             amount_krw=sell_amount,
             entry_price=state["entry_price"],
             realized_pnl_krw=realized_pnl,
             return_pct=ret_pct,
-            reason=f"기준봉 저가({format_price(effective_ref_low)}) 하향 이탈 전량 손절",
+            reason=sheet_reason,
         )
 
         if fill_note:
@@ -2327,6 +2422,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
             state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
             state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
+            state["breakout_date"] = curr_candle_date  # 고가 돌파 발생일 (연속 양봉 트레일링 기준일)
             new_stop, stop_basis = calc_breakout_stop(
                 confirmed_low, fill["price"], prev_low
             )
@@ -2436,6 +2532,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["total_volume"] = new_total_vol
             state["remaining_ratio"] = 1.0  # 잔액 매수로 포지션 100% 정상화
             state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
+            state["breakout_date"] = curr_candle_date  # 고가 돌파 발생일 (연속 양봉 트레일링 기준일)
             prev_low = state["effective_ref_low"]
             # 손실 상한은 잔액 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
             new_stop, stop_basis = calc_breakout_stop(

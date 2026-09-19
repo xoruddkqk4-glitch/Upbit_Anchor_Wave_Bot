@@ -557,5 +557,30 @@
   - **런타임 동작 검증**: `calc_position_size` 테스트 시 손절폭 5% ➔ 500,000원(상한선 클리핑), 손절폭 10% ➔ 500,000원, 손절폭 15% ➔ 333,333원 배정 정상 확인
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-19 16:32] 업데이트 이력 (Commit ID: 0d33e0e)
+- **수정 내용** (기준봉 고가 돌파 이후 연속 양봉 저가 트레일링 스탑 구현 및 매도 알림 세분화, 파일: `Upbit_Anchor_Wave_Bot.py`):
+  1. **고가 돌파 후 연속 양봉 저가 트레일링 스탑(Trailing Stop) 옵션 추가**:
+     - `ENABLE_BREAKOUT_CONSECUTIVE_BULLISH_TRAILING = True`: 트레일링 스탑 활성화
+     - `BREAKOUT_CONSECUTIVE_BULLISH_DAYS = 2`: 최소 연속 양봉 일수(2일 연속 양봉부터 2번째 양봉 저가로 순차 상향)
+  2. **돌파 시점 및 일봉별 트레일링 상태 관리 확장 (`new_ticker_state`)**:
+     - `"breakout_date"`: `BUY (BREAKOUT ALL-IN)`, `BUY (BREAKOUT FULL SCALE-IN)` 및 기존 보유 중 실시간 고가 돌파 시 발생일 자동 기록 (미기록 기존 포지션은 과거 확정봉 이력에서 최초 돌파봉 자동 역추적 호환)
+     - `"last_trailing_stop_date"`: 동일 확정봉 중복 알림 방지용 날짜 추적
+  3. **연속 양봉 감지 및 단방향 래칫(Ratchet) 상향 로직 (`process_ticker_strategy`)**:
+     - 돌파 발생일 이후 09:00 마감 확정봉들(`df.iloc[:-1]`)을 순회하며 양봉(`close > open`) 연속 개수 카운트
+     - 2일 이상 연속 양봉 유지 및 직전 확정 양봉의 저가(`latest_bullish_low`)가 기존 손절선보다 높을 때 손절선을 최신 양봉 저가로 실시간 상향
+     - 도중 음봉 마감 시 연속 양봉 카운트만 중단되고, 이미 상향된 손절선은 하향 없이 안전하게 유지
+  4. **텔레그램 알림 및 매도 사유 세분화**:
+     - 손절선 상향 시: `🚀 [BST 봇] 고가 돌파 후 N일 연속 양봉! 손절선 상향 (TRAILING STOP)` 텔레그램 알림 발송 (일봉당 1회)
+     - 청산 집행 시: 평단가 이상 익절 청산이면 `🎯 [BST 봇] 트레일링 스탑 익절! (TRAILING STOP)`으로 손절과 명확히 구분하여 전송
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **시뮬레이션 단위 테스트 100% 통과**:
+    - [테스트 1] 2연속 양봉 확정 시 2일차 양봉 저가(1,030원)로 손절선 상향 정상 동작 확인 (PASS)
+    - [테스트 2] 3연속 양봉 확정 시 3일차 양봉 저가(1,140원)로 손절선 추가 상향 정상 동작 확인 (PASS)
+    - [테스트 3] 4일차 음봉 발생 시 연속 카운트 중단 및 손절선 1,140원 유지 확인 (PASS)
+    - [테스트 4] 장중 가격 1,135원 하락 시 트레일링 스탑 전량 청산 신호 정상 격발 확인 (PASS)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+
 
 
