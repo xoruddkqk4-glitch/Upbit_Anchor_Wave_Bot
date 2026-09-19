@@ -113,6 +113,8 @@ REF_MIN_CHANGE_PCT = (
 )
 REF_EXPIRY_DAYS = 20  # 기준봉 유효기간(일). 20일 고가 돌파로 정의된 봉이 자기 룩백 창 밖으로 밀리는 시점. 보유 수량 없으면 감시 해제 (scan_ref_candles.py와 동일 값 유지)
 REENTRY_EXPIRY_DAYS = 15  # 5일선 매도 후 재매수 대기 유효기간(일). 15일 동안 매도가 재돌파 미발생 시 대기 해제
+ATR_PERIOD = 14  # 14일 ATR 계산 기간 (scan_ref_candles.py와 동일 값 유지)
+REENTRY_ATR_MULTIPLIER = 2.0  # 하이브리드 재매수 2*N(2.0*ATR) 반등 배수
 
 # 매수(진입) 전략 파라미터
 ENABLE_PULLBACK_ENTRY = True  # 눌림목 매수 전략 활성화 (중심가 이하 진입)[cite: 3]
@@ -1622,6 +1624,22 @@ def detect_reference_candles(df):
   return df
 
 
+def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
+  """확정 마감된 일봉(df.iloc[:-1]) 기준으로 14일 ATR(Average True Range) 계산"""
+  if df is None or len(df) < period + 2:
+    return 0.0
+  closed = df.iloc[:-1].copy()
+  prev_close = closed["close"].shift(1)
+  tr1 = closed["high"] - closed["low"]
+  tr2 = (closed["high"] - prev_close).abs()
+  tr3 = (closed["low"] - prev_close).abs()
+  tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+  atr_series = tr.rolling(window=period).mean()
+  if atr_series.empty or pd.isna(atr_series.iloc[-1]):
+    return 0.0
+  return float(atr_series.iloc[-1])
+
+
 def new_ticker_state():
   """종목별 초기 상태. 신규 등록·손절 초기화·기준봉 만료 세 곳에서 동일하게 사용 (키 누락 방지)"""
   return {
@@ -1644,12 +1662,16 @@ def new_ticker_state():
       "time_sym_below_high_logged": False,
       "ref_high": 0.0,
       "effective_ref_low": 0.0,
+      "anchor_low": 0.0,
       "ref_mid": 0.0,
       "rise_duration": 0,
       "wave_height": 0.0,
       "tiered_tp_executed_levels": [],
       "breakout_date": None,
       "last_trailing_stop_date": None,
+      "atr": 0.0,
+      "atr_date": None,
+      "trough_low": None,
   }
 
 
@@ -1753,6 +1775,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["active_ref_date"] = latest_ref_date_str
           state["ref_high"] = ref_high
           state["effective_ref_low"] = effective_ref_low
+          state["anchor_low"] = effective_ref_low
           state["ref_mid"] = ref_mid
           state["rise_duration"] = int(rise_duration)
           state["wave_height"] = wave_height
@@ -1766,6 +1789,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["entry_bought"] = False
           state["remaining_ratio"] = 1.0
           state["tiered_tp_executed_levels"] = []
+          state["trough_low"] = None
 
           if was_waiting:
             print(
@@ -1792,6 +1816,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
     wave_height = state["wave_height"]
     rise_duration = state["rise_duration"]
 
+    # 당일 ATR 갱신 (미기록 또는 날짜 불일치 시)
+    if state.get("atr_date") != curr_candle_date or state.get("atr", 0.0) <= 0:
+      state["atr"] = round(calculate_atr(df, ATR_PERIOD), 4)
+      state["atr_date"] = curr_candle_date
+    if not state.get("anchor_low"):
+      state["anchor_low"] = effective_ref_low
+
     # [기준봉 만료 및 손절선 기이탈 체크] 보유 수량이 없는 상태(미진입 또는 전량 청산 후 재매수 대기)
     is_holding = state["entry_bought"] and state["remaining_ratio"] > 0
     is_waiting_reentry = state.get("base_price") is not None
@@ -1802,9 +1833,38 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
     if not is_holding:
       if is_waiting_reentry:
-        # [재매수 대기 모드] 주가가 고가 아래로 일시 하락하더라도 휩소 방어를 위해 base_price를 즉시 해제하지 않고 유지.
-        # 가격이 하락하면 '현재가 > base_price' 조건 미충족으로 매수되지 않으므로 현금 안전.
-        # 유효기간(REENTRY_EXPIRY_DAYS, 15일) 동안 대기하며, 15일 경과 시에만 만료 초기화
+        # [재매수 대기 모드 - 하이브리드 룰]
+        # 1) trough_low 최신화: 매도일 이후 형성된 최저가 지속 추적
+        curr_candle_low = min(curr_close, float(df["low"].iloc[-1]))
+        min_since_sell = curr_candle_low
+        if base_calc_date and pd.Timestamp(base_calc_date) in df.index:
+          sub_candles = df.loc[df.index >= pd.Timestamp(base_calc_date)]
+          min_since_sell = min(min_since_sell, float(sub_candles["low"].min()))
+        prev_trough = state.get("trough_low")
+        state["trough_low"] = (
+            min(prev_trough, min_since_sell)
+            if (prev_trough is not None and prev_trough > 0)
+            else min_since_sell
+        )
+
+        # 2) 기준봉 원천 저가(anchor_low) 완전 이탈 체크
+        anchor_low = state.get("anchor_low", 0.0) or effective_ref_low
+        if anchor_low > 0 and curr_close < anchor_low:
+          print(
+              f"[{ticker}] [기준봉 지지 붕괴] 현재가({format_price(curr_close)}) < 기준봉 저가({format_price(anchor_low)})"
+              f" -> 재매수 대기 해제 및 상태 초기화"
+          )
+          SendMessage(
+              f"<b>🚨 [BST 봇] 기준봉 지지선 붕괴 (재매수 대기 해제)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>현재가</b>: {format_price(curr_close)}\n"
+              f"• <b>기준봉 저가</b>: {format_price(anchor_low)}\n"
+              f"• <b>사유</b>: 기준봉의 구조적 지지선 하향 이탈로 추세 파괴 ➔ 대기 해제 및 상태 초기화"
+          )
+          global_state[ticker] = new_ticker_state()
+          return signals
+
+        # 3) 유효기간(REENTRY_EXPIRY_DAYS, 15일) 경과 체크
         if ref_age_days >= REENTRY_EXPIRY_DAYS:
           print(
               f"[{ticker}] [재매수 대기 만료] 매도일 {base_calc_date} ({ref_age_days}일 경과"
@@ -2268,12 +2328,8 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["base_amount"] = sell_amount
             state["base_price_date"] = curr_candle_date
             state["entry_bought"] = False
-            # 돌파가 발생했거나 매도가가 기준봉 고가 이상인 경우:
-            # 기준봉 중심가/눌림목 등 내부 정보는 소멸 처리하고, 손절/지지 마진노선은 기준봉 고가로 확정
-            had_breakout = bool(state.get("breakout_date")) or (sell_price >= ref_high)
-            if had_breakout:
-              state["effective_ref_low"] = max(state.get("effective_ref_low", 0.0), ref_high)
-              state["ref_mid"] = 0.0
+            state["trough_low"] = sell_price  # 하이브리드 재매수 바닥 저점 추적 시작값
+            # 하이브리드 재매수 룰 적용: 고가~중심가 구간 2*N 반등 판정을 위해 ref_mid와 anchor_low 보존
 
           buffer_note = (
               f" (5일선 {format_price(curr_ma5)} 대비"
@@ -2322,99 +2378,132 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
     open_positions = count_open_positions(global_state)
     can_open_new = open_positions < MAX_OPEN_POSITIONS
 
-    # [3. 재매수 체크] 5일선 꺾여 기록된 기준 가격 현재가 상향 돌파 + 5일선 상승 전환(curr_ma5 > prev_ma5, 보합 제외) 동시 확인 시 재매수
-    if (
-        allow_entry
-        and can_open_new
-        and state["base_price"] is not None
-        and curr_close > state["base_price"]
-        and curr_ma5 > prev_ma5
-        and state["remaining_ratio"] == 0
-    ):
-      # 재매수 금액 = 직전 5일선 매도 금액(base_amount). 대칭 익절로 잔여가 25%만 남은 채 매도됐다면
-      # 재매수도 그만큼만 하여, 매도 직전보다 포지션이 커지는 것을 방지 (구버전 상태는 100만원으로 폴백)
-      re_entry_amount = state.get("base_amount") or ORDER_AMOUNT_KRW
-      fill = execute_buy(upbit_client, ticker, re_entry_amount, curr_close)
-      # 체결 0이면 기준가(base_price)를 유지해 다음 주기에 재매수 재시도
-      if fill["ok"]:
-        entry_price = fill["price"]
-        total_volume = fill["volume"]
-        state["entry_bought"] = True
-        state["entry_price"] = entry_price
-        state["total_volume"] = total_volume
-        state["remaining_ratio"] = 1.0
-        state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
-        # 돌파 후 재매수이므로 손절선은 기준봉 고가 또는 직전 확정봉 저가로 타이트하게 방어
-        state["effective_ref_low"] = max(
-            state.get("effective_ref_low", 0.0),
-            state.get("ref_high", 0.0),
-            confirmed_low,
-        )
-        # 파동 기준점(wave_anchor_*)과 대칭 익절 플래그(symmetry_tp_executed)는 '파동' 단위 상태라 재매수로 갱신하지 않는다.
-        # 재매수는 항상 이전 매도가보다 높게 되사므로, 기준점을 진입가로 옮기면 대칭 목표가 매번 위로 도망가
-        # 원래 파동의 목표에 결코 도달하지 못한다. 구버전 상태(기준점 미기록)만 현재 진입값으로 백필.
-        if not state.get("wave_anchor_price"):
-          state["wave_anchor_price"] = entry_price
-          state["wave_anchor_date"] = curr_candle_date
-        # 재매수 금액과 무관하게 분할 매수 회차를 만수로 채워 추가 매수 분기를 닫는다.
-        # (재매수 후 눌림목 조건에 다시 걸려 추가 분할 매수가 겹치는 과매수 경로 차단. 이후는 매도 로직만 동작)
-        state["scale_in_count"] = target_scale_in_steps
-        state["tiered_tp_executed_levels"] = []
-        triggered_base_price = state["base_price"]
-        triggered_base_date = state.get("base_price_date")
-        state["base_price"] = None
-        state["base_amount"] = None
-        state["base_price_date"] = None
+    # [3. 재매수 체크] 5일선 매도 후 재매수 대기 모드 (하이브리드 룰 적용: Zone 1 고가돌파 / Zone 2 2*N반등)
+    is_waiting_reentry = (
+        state.get("base_price") is not None and state.get("remaining_ratio", 0) == 0
+    )
+    if allow_entry and can_open_new and is_waiting_reentry:
+      curr_atr = state.get("atr", 0.0)
+      if curr_atr <= 0:
+        curr_atr = round(calculate_atr(df, ATR_PERIOD), 4)
+        state["atr"] = curr_atr
 
-        # 왕복 비용 로깅 (현재가 기준 판정을 유지하기로 한 결정에 따른 실측 데이터 수집용, 매매 제한 없음).
-        # 재매수가가 매도가보다 높은 만큼이 이번 왕복의 실질 비용(수수료·슬리피지 제외, 가격차만).
-        round_trip_pct = (
-            (entry_price - triggered_base_price) / triggered_base_price
-            if triggered_base_price > 0
-            else 0.0
-        )
-        round_trip_note = f"매도가 대비 {round_trip_pct * 100:+.2f}%에 재매수"
-        if triggered_base_date:
-          days_in_limbo = (
-              pd.Timestamp(curr_candle_date) - pd.Timestamp(triggered_base_date)
-          ).days
-          round_trip_note += f" ({triggered_base_date} 매도 후 {days_in_limbo}일 만)"
+      trough_low = state.get("trough_low")
+      if trough_low is None or trough_low <= 0:
+        trough_low = state["base_price"]
+        state["trough_low"] = trough_low
 
-        signals.append({
-            "Ticker": ticker,
-            "Event": "BUY (RE-ENTRY)",
-            "Strategy": (
-                f"기준가({triggered_base_price}) 현재가 상향 돌파 & 5일선 상승 전환"
-                f" -> 매도 금액과 동일하게 재매수 ({fill['amount']:,.0f}원) | {round_trip_note}"
-            ),
-            "Entry_Price": round(entry_price, 2),
-        })
+      bounce_threshold = trough_low + (REENTRY_ATR_MULTIPLIER * curr_atr)
 
-        # 텔레그램 재매수 알림
-        SendMessage(
-            f"<b>🚀 [BST 봇] 재매수 시그널 발생! (RE-ENTRY)</b>\n"
-            f"• <b>종목</b>: {ticker}\n"
-            f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
-            f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)\n"
-            f"• <b>매수 사유</b>: 직전 매도 기준가({format_price(triggered_base_price)}) 현재가 상향 돌파 + 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}) 확인\n"
-            f"• <b>왕복 비용</b>: {round_trip_note}\n"
-            f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
-        )
+      reentry_triggered = False
+      reentry_zone = ""
+      reentry_stop_loss = 0.0
+      reentry_reason = ""
 
-        save_trade_to_google_sheet(
-            ticker=ticker,
-            trade_type="매수",
-            event_name="BUY (RE-ENTRY)",
-            price=entry_price,
-            volume=total_volume,
-            amount_krw=fill["amount"],
-            entry_price=entry_price,
-            return_pct=round_trip_pct,
-            reason=(
-                f"이전 매도 기준가({format_price(triggered_base_price)}) 상향 돌파"
-                f" & 5일선 상승 전환 재매수 (매도 금액과 동일) | {round_trip_note}"
-            ),
-        )
+      # Zone 1: 기준봉 고가 이상 (고가 돌파 구간)
+      if curr_close >= ref_high:
+        if curr_close > state["base_price"] and curr_ma5 > prev_ma5:
+          reentry_triggered = True
+          reentry_zone = "Zone 1 (고가 돌파)"
+          reentry_stop_loss = max(
+              state.get("effective_ref_low", 0.0),
+              ref_high,
+              confirmed_low,
+          )
+          reentry_reason = (
+              f"고가 돌파 구간(Zone 1) - 직전 매도가({format_price(state['base_price'])}) 상향 돌파"
+              f" & 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}) 확인"
+          )
+      # Zone 2: 기준봉 고가와 중심가 사이 (하이브리드 2*N 반등 구간)
+      elif ref_mid <= curr_close < ref_high:
+        if curr_close >= bounce_threshold and curr_ma5 > prev_ma5:
+          reentry_triggered = True
+          reentry_zone = "Zone 2 (하이브리드 2*N 반등)"
+          reentry_stop_loss = trough_low  # 직전 바닥 저점을 손절가로 설정
+          reentry_reason = (
+              f"하이브리드 구간(Zone 2) - 바닥 저점({format_price(trough_low)}) 대비"
+              f" 2*ATR({format_price(REENTRY_ATR_MULTIPLIER * curr_atr)}) 반등 기준({format_price(bounce_threshold)}) 돌파"
+              f" & 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}) 확인"
+          )
+
+      if reentry_triggered:
+        re_entry_amount = state.get("base_amount") or ORDER_AMOUNT_KRW
+        fill = execute_buy(upbit_client, ticker, re_entry_amount, curr_close)
+        # 체결 0이면 대기 상태를 유지해 다음 주기에 재매수 재시도
+        if fill["ok"]:
+          entry_price = fill["price"]
+          total_volume = fill["volume"]
+          state["entry_bought"] = True
+          state["entry_price"] = entry_price
+          state["total_volume"] = total_volume
+          state["remaining_ratio"] = 1.0
+          state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
+          state["effective_ref_low"] = reentry_stop_loss
+
+          # 파동 기준점(wave_anchor_*)은 원래 파동의 대칭 목표 유지를 위해 보존 (미기록 시만 백필)
+          if not state.get("wave_anchor_price"):
+            state["wave_anchor_price"] = entry_price
+            state["wave_anchor_date"] = curr_candle_date
+
+          state["scale_in_count"] = target_scale_in_steps
+          state["tiered_tp_executed_levels"] = []
+          triggered_base_price = state["base_price"]
+          triggered_base_date = state.get("base_price_date")
+          state["base_price"] = None
+          state["base_amount"] = None
+          state["base_price_date"] = None
+          state["trough_low"] = None
+
+          # 왕복 비용 로깅
+          round_trip_pct = (
+              (entry_price - triggered_base_price) / triggered_base_price
+              if triggered_base_price > 0
+              else 0.0
+          )
+          round_trip_note = f"매도가 대비 {round_trip_pct * 100:+.2f}%에 재매수"
+          if triggered_base_date:
+            days_in_limbo = (
+                pd.Timestamp(curr_candle_date) - pd.Timestamp(triggered_base_date)
+            ).days
+            round_trip_note += f" ({triggered_base_date} 매도 후 {days_in_limbo}일 만)"
+
+          signals.append({
+              "Ticker": ticker,
+              "Event": f"BUY (RE-ENTRY - {reentry_zone})",
+              "Strategy": (
+                  f"{reentry_reason} -> 매도 금액과 동일하게 재매수 ({fill['amount']:,.0f}원) | {round_trip_note}"
+              ),
+              "Entry_Price": round(entry_price, 2),
+          })
+
+          # 텔레그램 재매수 알림
+          stop_loss_note = (
+              f"<b>{format_price(reentry_stop_loss)}</b> (직전 바닥 저점)"
+              if reentry_zone.startswith("Zone 2")
+              else f"<b>{format_price(reentry_stop_loss)}</b> (고가/확정봉 지지)"
+          )
+          SendMessage(
+              f"<b>🚀 [BST 봇] 재매수 시그널 발생! ({reentry_zone})</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
+              f"• <b>설정 손절가</b>: {stop_loss_note}\n"
+              f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)\n"
+              f"• <b>매수 사유</b>: {reentry_reason}\n"
+              f"• <b>왕복 비용</b>: {round_trip_note}\n"
+              f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+          )
+
+          save_trade_to_google_sheet(
+              ticker=ticker,
+              trade_type="매수",
+              event_name=f"BUY (RE-ENTRY {reentry_zone[:6]})",
+              price=entry_price,
+              volume=total_volume,
+              amount_krw=fill["amount"],
+              entry_price=entry_price,
+              return_pct=round_trip_pct,
+              reason=f"{reentry_reason} | {round_trip_note}",
+          )
 
     # [4. 진입 및 매수 체크] (allow_entry=False면 매도 감시만 수행하므로 전체 건너뜀)
     is_holding = state.get("entry_bought", False) and state.get("remaining_ratio", 0) > 0

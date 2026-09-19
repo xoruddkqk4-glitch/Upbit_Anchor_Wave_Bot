@@ -611,6 +611,40 @@
     - [테스트 3] 15일 초과 경과 시 `REENTRY_EXPIRY_DAYS` 만료 조건 정상 동작 확인 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-19 19:28] 업데이트 이력 (Commit ID: e08da53)
+- **수정 내용** (하이브리드 재매수 룰 적용: 2*N 반등 및 직전 바닥 저점 손절 연동, 일일 14일 ATR 산출 및 상태 저장, 파일: `Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`, `bot_state.json`):
+  1. **상태 스키마 확장 (`bot_state.json`, `new_ticker_state()`)**:
+     - `atr`: 14일 ATR 수치 저장
+     - `atr_date`: ATR 산출 기준일
+     - `trough_low`: 5일선 매도 후 형성된 최저 바닥가 실시간 추적
+     - `anchor_low`: 기준봉의 원천 저가 (트레일링 스탑과 분리하여 15일간 구조적 지지 마지노선 유지)
+  2. **일일 14일 ATR 계산 및 상태 갱신 (`scan_ref_candles.py`)**:
+     - `calculate_atr(df, period=14)`: 확정 마감 일봉(`df.iloc[:-1]`) 기준 14일 ATR 산출
+     - 매일 09:07 KST 스캔 시 각 감시 코인의 ATR을 자동 갱신하여 `bot_state.json`에 영구 보존
+     - 재매수 대기 종목의 바닥 저점(`trough_low`) 추적 및 09:07 텔레그램 보고서에 2*N 반등 목표가(`trough_low + 2.0*ATR`) 함께 표기
+     - 기준봉 원천 저가 이탈(`curr_close < anchor_low`) 시 지지 붕괴로 즉시 대기 해제
+  3. **하이브리드 재매수 룰 2구간 분기 구현 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - **Zone 1 (고가 이상, `curr_close >= ref_high`)**: 기존 모멘텀 재돌파 룰 유지 (`curr_close > base_price` AND `curr_ma5 > prev_ma5`). 설정 손절가는 고가/확정봉 지지.
+     - **Zone 2 (고가~중심가 사이, `ref_mid <= curr_close < ref_high`)**: 직전 바닥 저점 대비 **2*N (`2.0 * ATR`)** 이상 반등(`curr_close >= trough_low + 2.0 * atr`) + 5일선 우상향(`curr_ma5 > prev_ma5`) 확인 시 재매수 집행. 설정 손절가는 **직전 바닥 저점(`trough_low`)**.
+     - **Zone 3 (중심가 미만, `curr_close < ref_mid`)**: 관망 (매수 대기).
+     - **Zone 4 (기준봉 저가 이탈, `curr_close < anchor_low`)**: 기준봉 지지선 붕괴 감지 시 즉시 상태 초기화.
+     - **15일 유효기간 가드 (`REENTRY_EXPIRY_DAYS = 15`)**: 매도일로부터 15일 경과 시 만료 초기화 유지.
+  4. **5일선 매도 시 하이브리드 연동 최적화**:
+     - `SELL (MA5 DOWN)` 발생 시 `trough_low = sell_price`로 바닥 추적 시작.
+     - 기존에 `ref_mid`를 0으로 리셋하던 코드를 제거하여 고가~중심가 사이의 하이브리드 판정 데이터를 15일간 온전히 보존.
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
+  - **하이브리드 재매수 룰 통합 단위 테스트 8종 전원 통과 (`scratch/test_hybrid_rule.py`)**:
+    - [테스트 1] 봇-스캐너 간 14일 ATR 계산 일치성 및 정확도 검증 (bot=100.0, scan=100.0) (PASS)
+    - [테스트 2] `bot_state.json` 및 `new_ticker_state` 스키마 필드(`atr`, `atr_date`, `trough_low`, `anchor_low`) 무결성 확인 (PASS)
+    - [테스트 3] Zone 2 반등 목표(2*N) 미달 시 매수 금지 확인 (PASS)
+    - [테스트 4] Zone 2 반등 목표(2*N) 돌파 + 5일선 상승 확인 시 재매수 트리거 및 손절가=바닥저점(`trough_low`) 설정 확인 (PASS)
+    - [테스트 5] Zone 2 반등 목표 도달했으나 5일선 하향 시 매수 방어 확인 (PASS)
+    - [테스트 6] Zone 1 고가 이상이나 매도가 미달 시 관망 및 매도가 돌파 시 정상 재매수 확인 (PASS)
+    - [테스트 7] Zone 3 중심가 미만 매수 금지 및 Zone 4 기준봉 저가 이탈 시 지지 붕괴 해제 확인 (PASS)
+    - [테스트 8] 15일 경과 시 재매수 대기 정상 만료 확인 (PASS)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
 
 
 

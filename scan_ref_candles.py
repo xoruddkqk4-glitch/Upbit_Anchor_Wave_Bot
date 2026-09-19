@@ -32,6 +32,8 @@ REF_MIN_CHANGE_PCT = 0.10   # 기준봉 최소 상승률 (10% 이상 장대양�
 PULLBACK_RATIO = 0.5        # 눌림목 기준 비율 (0.5 = 중심가)
 REF_EXPIRY_DAYS = 20        # 기준봉 유효기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 만료<->재등록 순환 발생)
 REENTRY_EXPIRY_DAYS = 15    # 5일선 매도 후 재매수 대기 유효기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지
+ATR_PERIOD = 14             # 14일 ATR 계산 기간
+REENTRY_ATR_MULTIPLIER = 2.0  # 하이브리드 재매수 2*N(2.0*ATR) 반등 배수
 PREV_HIGH_LOOKBACK_DAYS = 20  # 기준봉 판정용 전고점 룩백(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지 (불일치 시 봇·스캐너가 다른 기준봉 탐지)
 SWING_LOW_LOOKBACK_DAYS = 20  # 1차 파동 스윙 저점 탐색 기간(일). Upbit_Anchor_Wave_Bot.py와 동일 값 유지
 MAX_TARGET_COUNT = 20       # 스캔 대상 최대 코인 수
@@ -266,6 +268,22 @@ def detect_reference_candles(df):
     return df
 
 
+def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
+    """확정 마감된 일봉(df.iloc[:-1]) 기준으로 14일 ATR(Average True Range) 계산"""
+    if df is None or len(df) < period + 2:
+        return 0.0
+    closed = df.iloc[:-1].copy()
+    prev_close = closed["close"].shift(1)
+    tr1 = closed["high"] - closed["low"]
+    tr2 = (closed["high"] - prev_close).abs()
+    tr3 = (closed["low"] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_series = tr.rolling(window=period).mean()
+    if atr_series.empty or pd.isna(atr_series.iloc[-1]):
+        return 0.0
+    return float(atr_series.iloc[-1])
+
+
 def scan_all_reference_candles():
     """상태 파일 락을 잡은 뒤 기준봉 스캔 본체를 실행 (락 획득 실패 시 이번 스캔 건너뜀)
 
@@ -335,12 +353,30 @@ def _scan_all_reference_candles_locked():
                     "base_price": None,
                     "ref_high": 0.0,
                     "effective_ref_low": 0.0,
+                    "anchor_low": 0.0,
                     "ref_mid": 0.0,
                     "rise_duration": 0,
                     "wave_height": 0.0,
+                    "atr": 0.0,
+                    "atr_date": None,
+                    "trough_low": None,
                 }
 
             state = global_state[ticker]
+
+            # 일봉 14일 ATR 계산 및 상태 저장 (매일 09:07 1회 갱신)
+            atr_val = calculate_atr(df, period=ATR_PERIOD)
+            confirmed_candle_date = (
+                df.index[-2].strftime("%Y-%m-%d")
+                if len(df) >= 2
+                else df.index[-1].strftime("%Y-%m-%d")
+            )
+            state["atr"] = round(atr_val, 4)
+            state["atr_date"] = confirmed_candle_date
+            if "anchor_low" not in state:
+                state["anchor_low"] = state.get("effective_ref_low", 0.0)
+            if "trough_low" not in state:
+                state["trough_low"] = None
 
             # 2. 이미 매수 포지션 보유 중인 코인은 기존 활성 기준봉 상태를 유지하며 09:07 보고서에 정상 포함
             # (단, 잔여 수량이 0인 '재매수 대기' 코인은 최신 기준봉 발생 여부를 감지할 수 있도록 스캔을 진행)
@@ -354,6 +390,7 @@ def _scan_all_reference_candles_locked():
                 print(
                     f"  [{tag}] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
                     f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
+                    f" | 14일 ATR: {format_price(state['atr'])}"
                 )
 
                 all_reported_candles.append({
@@ -364,6 +401,7 @@ def _scan_all_reference_candles_locked():
                     "ref_high": ref_high,
                     "ref_mid": ref_mid,
                     "effective_ref_low": effective_ref_low,
+                    "atr": state["atr"],
                 })
                 time.sleep(API_DELAY_SEC)
                 continue
@@ -449,10 +487,12 @@ def _scan_all_reference_candles_locked():
                     state["base_price_date"] = None
                     state["entry_bought"] = False
                     state["breakout_date"] = None
+                    state["trough_low"] = None
 
                 state["active_ref_date"] = ref_date_str
                 state["ref_high"] = ref_high
                 state["effective_ref_low"] = effective_ref_low
+                state["anchor_low"] = effective_ref_low
                 state["ref_mid"] = ref_mid
                 state["rise_duration"] = int(rise_duration)
                 state["wave_height"] = wave_height
@@ -486,6 +526,7 @@ def _scan_all_reference_candles_locked():
                     "ref_high": ref_high,
                     "ref_mid": ref_mid,
                     "effective_ref_low": effective_ref_low,
+                    "atr": state.get("atr", 0.0),
                 })
             else:
                 # ref_indices가 추출되지 않은 경우라도, 기존 active_ref_date가 유효하고 손절가 상회 시 감시 중으로 포함
@@ -500,8 +541,21 @@ def _scan_all_reference_candles_locked():
                     ref_age_days = (df.index[-1] - pd.Timestamp(base_calc_date)).days
 
                     if is_reentry_waiting:
-                        # 재매수 대기 종목: 주가 하락에도 휩소 방어를 위해 유지, 15일 유효기간 경과 시에만 만료
-                        if ref_age_days >= REENTRY_EXPIRY_DAYS:
+                        # 재매수 대기 종목:
+                        # 1) 기준봉 지지 붕괴 체크 (anchor_low 하회 시 해제)
+                        anchor_low = state.get("anchor_low", 0.0) or effective_ref_low
+                        if anchor_low > 0 and curr_close < anchor_low:
+                            print(
+                                f"  [재매수 대기 해제 - 기준봉 지지 붕괴] {ticker} -> 현재가({format_price(curr_close)})"
+                                f" < 기준봉 저가({format_price(anchor_low)}) 지지 이탈"
+                            )
+                            state["active_ref_date"] = None
+                            state["base_price"] = None
+                            state["base_amount"] = None
+                            state["base_price_date"] = None
+                            state["trough_low"] = None
+                        # 2) 15일 유효기간 경과 시 만료
+                        elif ref_age_days >= REENTRY_EXPIRY_DAYS:
                             print(
                                 f"  [재매수 대기 만료] {ticker} -> 매도일: {base_calc_date} ({ref_age_days}일 경과"
                                 f" >= {REENTRY_EXPIRY_DAYS}일) 대기 해제"
@@ -510,10 +564,25 @@ def _scan_all_reference_candles_locked():
                             state["base_price"] = None
                             state["base_amount"] = None
                             state["base_price_date"] = None
+                            state["trough_low"] = None
                         else:
+                            # 바닥 저점 최신화
+                            min_since_sell = curr_close
+                            if base_calc_date and pd.Timestamp(base_calc_date) in df.index:
+                                sub_candles = df.loc[df.index >= pd.Timestamp(base_calc_date)]
+                                min_since_sell = float(sub_candles["low"].min())
+                            prev_trough = state.get("trough_low")
+                            state["trough_low"] = (
+                                min(prev_trough, min_since_sell)
+                                if (prev_trough is not None and prev_trough > 0)
+                                else min_since_sell
+                            )
+                            bounce_target = state["trough_low"] + (REENTRY_ATR_MULTIPLIER * state.get("atr", 0.0))
+
                             print(
-                                f"  [재매수 대기] {ticker} -> 기준일: {active_ref_date} | 매도가: {format_price(state['base_price'])} | 현재가: {format_price(curr_close)}"
-                                f" (유효 {ref_age_days}/{REENTRY_EXPIRY_DAYS}일)"
+                                f"  [재매수 대기] {ticker} -> 기준일: {active_ref_date} | 매도가: {format_price(state['base_price'])}"
+                                f" | 현재가: {format_price(curr_close)} | 바닥저점: {format_price(state['trough_low'])}"
+                                f" | 2*N반등선: {format_price(bounce_target)} (유효 {ref_age_days}/{REENTRY_EXPIRY_DAYS}일)"
                             )
                             all_reported_candles.append({
                                 "ticker": ticker,
@@ -523,6 +592,9 @@ def _scan_all_reference_candles_locked():
                                 "ref_high": ref_high,
                                 "ref_mid": ref_mid,
                                 "effective_ref_low": effective_ref_low,
+                                "atr": state.get("atr", 0.0),
+                                "trough_low": state["trough_low"],
+                                "bounce_target": bounce_target,
                             })
                     else:
                         # 순수 미진입 종목: 손절선 이탈 또는 만료 체크
@@ -629,6 +701,13 @@ def _scan_all_reference_candles_locked():
                 price_rows = [high_line, mid_line, price_line, low_line]
             else:
                 price_rows = [high_line, mid_line, low_line, price_line]
+
+            if c.get("tag") == "재매수 대기" and c.get("trough_low") and c.get("bounce_target"):
+                hybrid_line = (
+                    f"• <b>[하이브리드]</b> 바닥: {format_price(c['trough_low'])} ➔"
+                    f" 2*N반등목표: <b>{format_price(c['bounce_target'])}</b> (14일 ATR: {format_price(c.get('atr', 0.0))})"
+                )
+                price_rows.append(hybrid_line)
 
             block = (
                 f"<b>• {ticker}</b> <code>{tag_str}</code> (기준일: {ref_date})\n"
