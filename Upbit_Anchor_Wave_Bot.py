@@ -179,9 +179,10 @@ def get_active_tiered_tp_levels():
   return levels
 
 
-# 손절가 자동 설정
-STOP_LOSS_BASE = "LOW"  # 세력 마진노선인 기준봉 저가(Low) 기반 자동 손절[cite: 3]
-BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 진입 손절선 상한: 직전 확정봉 저가가 이보다 멀면 진입가 -5%로 제한 (전액 포지션 단일 최대 손실 통제)
+# 손절가 자동 설정 및 돌파 매매 완충 버퍼 손절선
+STOP_LOSS_BASE = "LOW"  # 세력 마진노선인 기준봉 저가(Low) 기반 자동 손절
+BREAKOUT_BUFFER_PCT = 0.02  # 돌파 매매 기준봉 고가 완충 버퍼 (0.02 = 기준봉 고가 대비 -2.0% 이탈 시 손절)
+BREAKOUT_MAX_LOSS_PCT = 0.05  # 돌파 매매 최대 손실 상한선: 급등 추격 진입 시 진입가 -5.0%로 손실 캡 제한
 
 # ─────────────────────────────────────
 # 고가 돌파 후 연속 양봉 저가 트레일링 스탑 (Consecutive Bullish Trailing Stop)
@@ -1529,20 +1530,32 @@ def execute_sell(upbit_client, ticker, volume, fallback_price, is_stop_loss=Fals
   return fill
 
 
-def calc_breakout_stop(confirmed_low, entry_price, current_stop):
+def calc_breakout_stop(ref_high, entry_price, current_stop):
   """돌파 진입 손절선 산출 -> (손절가, 산출 근거)
 
-  기본은 직전 확정봉(돌파를 확정한 마감 일봉) 저가. 아래서 치고 올라온 장대 돌파봉은
-  저가가 지나치게 멀 수 있어 진입가 대비 BREAKOUT_MAX_LOSS_PCT를 상한으로 둔다.
+  기준봉 고가(ref_high) 대비 완충 버퍼(BREAKOUT_BUFFER_PCT, 기본 2.0%)를 1차 손절선으로 적용.
+  돌파 지지선 붕괴 시 조기에 가짜 돌파를 차단하여 손익비를 극대화한다.
+  단, 급등 추격 매수로 인해 버퍼 손절선이 진입가 대비 지나치게 멀어지는 경우,
+  진입가 대비 최대 손실 상한선(BREAKOUT_MAX_LOSS_PCT, 기본 5.0%)을 적용하여 계좌를 보호한다.
   손절선은 위로만 이동하므로 기존 손절선보다 낮아지지는 않는다.
   """
-  cap = entry_price * (1 - BREAKOUT_MAX_LOSS_PCT)
-  if cap > confirmed_low:
-    stop, basis = cap, f"진입가 -{BREAKOUT_MAX_LOSS_PCT:.0%} 상한 적용"
+  if ref_high is None or ref_high <= 0:
+    ref_high = entry_price
+
+  buffer_stop = ref_high * (1.0 - BREAKOUT_BUFFER_PCT)
+  loss_cap = entry_price * (1.0 - BREAKOUT_MAX_LOSS_PCT)
+
+  if buffer_stop >= loss_cap:
+    stop = buffer_stop
+    basis = f"기준봉 고가 -{BREAKOUT_BUFFER_PCT * 100:.1f}% 버퍼 적용"
   else:
-    stop, basis = confirmed_low, "직전 확정봉 저가"
-  if current_stop > stop:
-    stop, basis = current_stop, "기존 손절선 유지"
+    stop = loss_cap
+    basis = f"진입가 -{BREAKOUT_MAX_LOSS_PCT * 100:.0f}% 상한 적용"
+
+  if current_stop and current_stop > stop:
+    stop = current_stop
+    basis = "기존 손절선 유지"
+
   return stop, basis
 
 
@@ -1585,9 +1598,9 @@ def calc_position_size(entry_price, stop_loss_price, max_amount=MAX_BUY_AMOUNT_K
   """손절폭 기반 변동성 가중 포지션 사이징(Risk Parity) -> 목표 매수 총금액(KRW)
 
   손절폭((entry - stop) / entry)에 비례하여 투자금을 조절함으로써 1회 손절 시 잃는
-  최대 손실금을 MAX_LOSS_PER_TRADE_KRW(기본 3만 원) 수준으로 균등화한다.
+  최대 손실금을 MAX_LOSS_PER_TRADE_KRW(기본 5만 원) 수준으로 균등화한다.
   - 손절폭이 큰 고변동성 알트코인은 적게 매수하여 계좌 타격 방어
-  - 손절폭이 타이트한 메이저 코인은 최대 max_amount(100만 원)까지 매수
+  - 손절폭이 타이트한 메이저 코인은 최대 max_amount(50만 원)까지 매수
   - 최소 주문액(MIN_BUY_AMOUNT_KRW) ~ 최대 주문액(max_amount) 범위로 클램핑
   """
   if not ENABLE_VOLATILITY_SIZING or entry_price <= 0:
@@ -2567,7 +2580,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           # 1) 돌파 매매: 현재가가 기준봉 고가 돌파 시 변동성 사이징 산출 후 전액 매수 (장중 실시간 5분 주기 감시)
           prev_low = state["effective_ref_low"]
           expected_stop, _ = calc_breakout_stop(
-              confirmed_low, curr_close, prev_low
+              ref_high, curr_close, prev_low
           )
           target_amount = calc_position_size(curr_close, expected_stop)
           fill = execute_buy(upbit_client, ticker, target_amount, curr_close)
@@ -2584,7 +2597,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
             state["breakout_date"] = curr_candle_date  # 고가 돌파 발생일 (연속 양봉 트레일링 기준일)
             new_stop, stop_basis = calc_breakout_stop(
-                confirmed_low, fill["price"], prev_low
+                ref_high, fill["price"], prev_low
             )
             state["effective_ref_low"] = new_stop
 
@@ -2696,7 +2709,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             prev_low = state["effective_ref_low"]
             # 손실 상한은 잔액 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
             new_stop, stop_basis = calc_breakout_stop(
-                confirmed_low, state["entry_price"], prev_low
+                ref_high, state["entry_price"], prev_low
             )
             state["effective_ref_low"] = new_stop
 
