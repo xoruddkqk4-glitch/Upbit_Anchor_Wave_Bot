@@ -645,7 +645,7 @@
     - [테스트 8] 15일 경과 시 재매수 대기 정상 만료 확인 (PASS)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 재확인 완료 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
-## 📝 [2026-09-22 21:45] 업데이트 이력 (Commit ID: <동기화 예정>)
+## 📝 [2026-09-22 21:45] 업데이트 이력 (Commit ID: 40c16a5)
 - **수정 내용** (돌파 매매 손절선 고도화: 기준봉 고가 2% 완충 버퍼 및 진입가 -5% 비상 상한선 하이브리드 전략 적용, 최대 매수 한도 50만 원 문서 동기화, GEMINI.md 생성, 파일: `Upbit_Anchor_Wave_Bot.py`, `GEMINI.md`, `README.md`):
   1. **돌파 매매 완충 버퍼 손절선 파라미터 신설 (`Upbit_Anchor_Wave_Bot.py`)**:
      - `BREAKOUT_BUFFER_PCT = 0.02`: 기준봉 고가 대비 -2.0% 하향 이탈 시 조기 손절하여 가짜 돌파(Bull Trap)를 빠르게 차단하고 손익비 극대화
