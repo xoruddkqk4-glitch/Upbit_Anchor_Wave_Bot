@@ -2077,6 +2077,33 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           )
           return signals
 
+        # 완전 청산된 경우: 매도가격과 기준봉 고가(ref_high) 비교 분기
+        ref_high = state.get("ref_high", 0.0)
+        if ref_high > 0 and sell_price > ref_high:
+          # [분기 A: 고가 위 청산]
+          # 기준봉 고점 위에서 손절/청산된 경우:
+          # 상태를 완전 초기화하지 않고 매도가를 기준가(base_price)로 두어 재매수 대기 모드로 진입.
+          # (다음 주기 고가 위에서의 무한 휩소 재매수 방지 + 직전 매도가 재돌파 & 5일선 우상향 시만 재진입)
+          state["base_price"] = sell_price
+          state["base_amount"] = sell_amount
+          state["base_price_date"] = curr_candle_date
+          state["entry_bought"] = False
+          state["remaining_ratio"] = 0.0
+          state["trough_low"] = sell_price
+          state["breakout_date"] = None
+          state["tiered_tp_executed_levels"] = []
+          print(
+              f"[{ticker}] [고가 위 청산 -> 재매수 대기] 매도가({format_price(sell_price)}) > 기준봉 고가({format_price(ref_high)})"
+              f" 확인 -> 매도가({format_price(sell_price)}) 기준 재매수 대기 모드 진입"
+          )
+          SendMessage(
+              f"<b>🔄 [BST 봇] 고가 위 청산 ➔ 재매수 대기 모드 진입</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>매도가</b>: {format_price(sell_price)} (기준봉 고가 {format_price(ref_high)} 상회)\n"
+              f"• <b>내용</b>: 고점 위 청산 휩소 방지 ➔ 직전 매도가({format_price(sell_price)}) 재돌파 및 5일선 우상향 시에만 재매수 감시"
+          )
+          return signals
+
       global_state[ticker] = new_ticker_state()
       return signals
 

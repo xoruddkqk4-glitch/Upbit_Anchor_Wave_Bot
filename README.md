@@ -696,3 +696,24 @@
   - AWS EC2 환경에서의 백그라운드 구동 및 텔레그램 웹훅 충돌 자가 해제 동작 검증 완료
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-23 09:10] 업데이트 이력 (Commit ID: c21c8ee)
+- **수정 내용** (돌파 매수 후 손절/청산 시 기준봉 고가(ref_high) 상하 분기 처리 및 고가 위 재매수 대기 모드 연동, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_breakout_stop_reentry.py` 신규, `README.md`):
+  1. **기준봉 고가(ref_high) 상하 청산 분기 로직 신설 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기존의 무조건적인 `global_state[ticker] = new_ticker_state()` 초기화 로직을 실제 체결 매도가격(`sell_price`)과 기준봉 고가(`ref_high`)의 상대 위치에 따라 이원화 분기 처리
+     - **[분기 A: 고가 위 청산 (`sell_price > ref_high`)]**:
+       - 급등 추격 진입 후 비상 손절(-5%)이나 트레일링 스탑 등으로 청산되었으나 매도가가 여전히 기준봉 고가 위에 있는 경우
+       - 상태를 완전 초기화하지 않고 **`base_price = sell_price` 기록 및 `is_waiting_reentry` 재매수 대기 모드**로 진입
+       - **효과**: 다음 턴(5분 뒤) 고가 위라는 이유만으로 무한 휩소 재매수되는 버그를 원천 차단하고, 가격이 직전 매도가(`base_price`)를 다시 상향 돌파하고 5일선이 우상향(`Zone 1` 조건)할 때만 안전하게 재진입하도록 제어
+     - **[분기 B: 고가 아래 청산 (`sell_price <= ref_high`)]**:
+       - 기준봉 고점 이하로 무너진 돌파 실패/손절의 경우 상태를 완전 초기화하여 고가 아래 박스권 흔들기에서의 불필요한 연타 휩소/재매수 원천 방어
+  2. **Windows cp949 인코딩 호환성 강화**:
+     - 콘솔 출력 문자열 내 특수 이모지/화살표(`➔`)를 표준 화살표(`->`)로 안전하게 치환하여 Windows 환경에서의 `UnicodeEncodeError` 방어
+  3. **단위 테스트 스위트 신설 및 전원 검증 통과 (`test_breakout_stop_reentry.py`)**:
+     - 고가 이하 손절 매도 시 `new_ticker_state` 완전 초기화 검증 (PASS)
+     - 고가 위 손절/청산 시 `base_price` 설정 및 재매수 대기 모드 진입 무결성 검증 (PASS)
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py test_breakout_stop_reentry.py` 통과 (Exit Code 0)
+  - `python -m unittest test_breakout_stop_reentry.py` 2/2 단위 테스트 PASS
+  - `python -m unittest test_manual_ref.py` 기존 8종 단위 테스트 100% 호환 PASS
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
