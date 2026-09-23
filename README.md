@@ -717,3 +717,24 @@
   - `python -m unittest test_manual_ref.py` 기존 8종 단위 테스트 100% 호환 PASS
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-23 15:41] 업데이트 이력 (Commit ID: 5320b66)
+- **수정 내용** (텔레그램 /status 명령어 고도화: 보유 코인·미보유 기준봉 O/X 코인별 맞춤형 실시간 현황 리포트 구현, 파일: `telegram_commander.py`, `test_manual_ref.py`, `README.md`):
+  1. **실시간 현재가 일괄 조회 엔진 구현 (`get_current_prices`)**:
+     - 업비트 Ticker API(`https://api.upbit.com/v1/ticker`)를 활용해 보유 종목 및 기준봉 감시 종목의 현재가를 1회의 네트워크 호출로 일괄 조회 (타임아웃 4초 및 예외 방어 적용)
+  2. **1. 보유 코인 리포트 정보 강화**:
+     - **현재가**, **손절가**(`effective_ref_low`), **보유 비율**(`remaining_ratio`), **현재 수익률**(`((현재가 - 평단가) / 평단가) * 100`)을 명확히 출력하고 평단가 및 기준일 정보 보존
+  3. **2. 미보유 코인 (기준봉 O) 상대 가격 순서 자동 배치 및 재매수 대기 연동**:
+     - **일반 기준봉 감시 종목 (`format_watching_price_order`)**: 기준봉의 **고가**, **중심가**, **손절가**와 함께 **현재가**의 위치를 가격 크기 순서로 자동 배치 (`고가 > 현재가 > 중심가 > 손절가` 또는 `고가 > 중심가 > 현재가 > 손절가` 등)
+     - **매도가가 기준가인 상태 (재매수 대기)**: 5일선 매도 등으로 `base_price`가 기록된 종목의 경우 **기준가(매도가)**와 **현재가** 정보를 깔끔하게 출력
+  4. **3. 미보유 코인 (기준봉 X) 코인명 전용 리포트**:
+     - 감시 대상 중 미보유 및 기준봉이 등록되지 않은 코인들은 **코인명 정보만** 간결하게 한 줄로 출력하여 시인성 극대화 및 `/setref` 등록 안내 연동
+  5. **단위 테스트 스위트 확장 (`test_manual_ref.py`)**:
+     - `test_format_watching_price_order`: 4가지 현재가 구간 및 None fallback 단위 테스트 5종 추가 검증 (PASS)
+     - `test_handle_status_command`: 보유·미보유(기준봉O/X) 3단계 분기 및 포맷 무결성 모킹 검증 추가 (PASS)
+- **검증 결과**:
+  - `python -m py_compile telegram_commander.py test_manual_ref.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_manual_ref.py` 10개 단위 테스트 전원 통과 (Ran 10 tests in 0.043s, OK)
+  - `python -m unittest test_breakout_stop_reentry.py` 회귀 테스트 전원 통과 (OK)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+

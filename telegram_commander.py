@@ -108,56 +108,154 @@ def handle_help_command(chat_id):
     send_message(chat_id, msg)
 
 
+def get_current_prices(tickers):
+    """업비트 현재가 일괄 조회 -> {market: trade_price}"""
+    valid_tickers = [t for t in tickers if t]
+    if not valid_tickers:
+        return {}
+    try:
+        url = f"https://api.upbit.com/v1/ticker?markets={','.join(valid_tickers)}"
+        res = requests.get(url, timeout=4)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list):
+                return {
+                    item["market"]: float(item["trade_price"])
+                    for item in data
+                    if "market" in item and item.get("trade_price") is not None
+                }
+    except Exception as e:
+        print(f"[telegram_commander] 현재가 조회 오류: {e}")
+    return {}
+
+
+def format_watching_price_order(ref_h: float, ref_m: float, ref_l: float, curr_p: float = None) -> str:
+    """
+    미보유 기준봉 코인의 고가, 중심가, 손절가 및 적절한 위치의 현재가 순서 포맷팅
+    예:
+      고가 1,000원 > <b>현재가 900원</b> > 중심가 800원 > 손절가 600원
+      고가 1,000원 > 중심가 800원 > <b>현재가 700원</b> > 손절가 600원
+    """
+    if curr_p is None or curr_p <= 0:
+        return f"고가 {format_price(ref_h)} > 중심가 {format_price(ref_m)} > 손절가 {format_price(ref_l)} (현재가: -)"
+
+    # 정렬용: (라벨, 가격, 동점 시 우선순위: 고가(1), 중심가(2), 손절가(3), 현재가(4))
+    items = [
+        ("고가", ref_h, 1),
+        ("중심가", ref_m, 2),
+        ("손절가", ref_l, 3),
+        ("현재가", curr_p, 4),
+    ]
+    # 가격 내림차순 정렬 (동점 시 고정 가격선 우선 후 현재가 배치)
+    items.sort(key=lambda x: (-x[1], x[2]))
+
+    parts = []
+    for label, price, _ in items:
+        p_str = format_price(price)
+        if label == "현재가":
+            parts.append(f"<b>현재가 {p_str}</b>")
+        else:
+            parts.append(f"{label} {p_str}")
+
+    return " > ".join(parts)
+
+
 def handle_status_command(chat_id):
     """현재 감시 및 보유 현황 리포트"""
     state = load_state(STATE_FILE)
 
-    holdings = []
-    reentries = []
-    watchings = []
+    holding_items = []
+    reentry_items = []
+    watching_items = []
+
+    needed_tickers = set()
 
     for ticker, st in state.items():
         if st.get("entry_bought", False) and st.get("remaining_ratio", 0) > 0:
-            entry_p = st.get("entry_price", 0.0)
-            rem_pct = int(round(st.get("remaining_ratio", 1.0) * 100))
-            ref_d = st.get("active_ref_date", "-")
-            holdings.append(f"• <b>{ticker}</b>: 평단 {format_price(entry_p)} | 잔여 {rem_pct}% | 기준일 {ref_d}")
+            holding_items.append((ticker, st))
+            needed_tickers.add(ticker)
         elif st.get("base_price") is not None:
-            base_p = st.get("base_price", 0.0)
-            ref_d = st.get("active_ref_date", "-")
-            reentries.append(f"• <b>{ticker}</b>: 매도가 {format_price(base_p)} | 기준일 {ref_d}")
+            reentry_items.append((ticker, st))
+            needed_tickers.add(ticker)
         elif st.get("active_ref_date"):
-            ref_d = st.get("active_ref_date")
-            tag = "수동" if st.get("manual_registered") else "자동"
-            ref_h = st.get("ref_high", 0.0)
-            ref_l = st.get("effective_ref_low", 0.0)
-            watchings.append(
-                f"• <b>{ticker}</b> [{tag}]: 기준일 {ref_d} (고가 {format_price(ref_h)} / 손절 {format_price(ref_l)})"
-            )
+            watching_items.append((ticker, st))
+            needed_tickers.add(ticker)
 
-    avail_info = get_available_tickers(STATE_FILE)
-    avail_count = len(avail_info["tickers_list"])
+    # 필요 종목 현재가 일괄 조회
+    prices = get_current_prices(list(needed_tickers))
 
     lines = ["<b>📊 [BST 봇] 실시간 감시 및 포지션 현황</b>\n"]
 
-    if holdings:
-        lines.append(f"<b>[보유 포지션 ({len(holdings)}개)]</b>")
-        lines.extend(holdings)
-        lines.append("")
+    # 1. 보유 코인의 경우: 현재가, 손절가, 보유 비율, 현재 수익률
+    lines.append(f"<b>[1. 보유 코인 ({len(holding_items)}개)]</b>")
+    if holding_items:
+        for ticker, st in holding_items:
+            curr_p = prices.get(ticker)
+            entry_p = st.get("entry_price", 0.0)
+            stop_p = st.get("effective_ref_low", 0.0)
+            rem_pct = int(round(st.get("remaining_ratio", 1.0) * 100))
+            ref_d = st.get("active_ref_date", "-")
 
-    if reentries:
-        lines.append(f"<b>[재매수 대기 ({len(reentries)}개)]</b>")
-        lines.extend(reentries)
-        lines.append("")
+            curr_str = format_price(curr_p) if curr_p else "-"
+            if curr_p and entry_p > 0:
+                pnl_pct = (curr_p - entry_p) / entry_p * 100
+                pnl_str = f"{pnl_pct:+.2f}%"
+            else:
+                pnl_str = "-"
 
-    if watchings:
-        lines.append(f"<b>[감시 중인 기준봉 ({len(watchings)}개)]</b>")
-        lines.extend(watchings)
-        lines.append("")
+            lines.append(
+                f"• <b>{ticker}</b>: 현재가 {curr_str} (수익률 {pnl_str}) | 손절가 {format_price(stop_p)} | "
+                f"보유 비율 {rem_pct}% (평단 {format_price(entry_p)} | 기준일 {ref_d})"
+            )
     else:
-        lines.append("<i>현재 활성 기준봉 종목이 없습니다.</i>\n")
+        lines.append("<i>보유 중인 코인이 없습니다.</i>")
+    lines.append("")
 
-    lines.append(f"ℹ️ 미등록 감시 가능 코인: <b>{avail_count}개</b> (등록: /setref)")
+    # 2. 미보유 코인 중 기준봉이 있는 코인
+    # - 일반 기준봉 감시 중: 기준봉의 고가, 중심가, 손절가, 적절한 위치의 현재가
+    # - 매도가가 기준가인 상태: 기준가와 현재가 정보
+    has_ref_count = len(watching_items) + len(reentry_items)
+    lines.append(f"<b>[2. 미보유 코인 (기준봉 O) ({has_ref_count}개)]</b>")
+    if has_ref_count > 0:
+        # 일반 감시 코인
+        for ticker, st in watching_items:
+            ref_d = st.get("active_ref_date", "-")
+            tag = "수동" if st.get("manual_registered") else "자동"
+            ref_h = st.get("ref_high", 0.0)
+            ref_l = st.get("effective_ref_low", 0.0)
+            ref_m = st.get("ref_mid", 0.0)
+            if not ref_m and ref_h and ref_l:
+                ref_m = ref_l + (ref_h - ref_l) * 0.5
+
+            curr_p = prices.get(ticker)
+            order_str = format_watching_price_order(ref_h, ref_m, ref_l, curr_p)
+            lines.append(f"• <b>{ticker}</b> [{tag} | 기준일 {ref_d}]\n  └ {order_str}")
+
+        # 매도가가 기준가인 상태 (재매수 대기)
+        for ticker, st in reentry_items:
+            base_p = st.get("base_price", 0.0)
+            ref_d = st.get("active_ref_date", "-")
+            curr_p = prices.get(ticker)
+            curr_str = format_price(curr_p) if curr_p else "-"
+            lines.append(
+                f"• <b>{ticker}</b> [재매수 대기 | 기준일 {ref_d}]\n  └ 기준가 {format_price(base_p)} | 현재가 {curr_str}"
+            )
+    else:
+        lines.append("<i>기준봉이 있는 미보유 코인이 없습니다.</i>")
+    lines.append("")
+
+    # 3. 미보유 코인 중 기준봉이 없는 코인의 경우: 코인명 정보만
+    avail_info = get_available_tickers(STATE_FILE)
+    unregistered_tickers = [ticker for _, ticker in avail_info["tickers_list"]]
+    coin_names = [t.replace("KRW-", "") for t in unregistered_tickers]
+
+    lines.append(f"<b>[3. 미보유 코인 (기준봉 X) ({len(coin_names)}개)]</b>")
+    if coin_names:
+        lines.append(f"• {', '.join(coin_names)}")
+        lines.append("💡 <i>기준봉 수동 등록: <code>/setref</code></i>")
+    else:
+        lines.append("<i>모든 감시 대상 코인이 보유 중이거나 기준봉 등록 상태입니다.</i>")
+
     send_message(chat_id, "\n".join(lines))
 
 
