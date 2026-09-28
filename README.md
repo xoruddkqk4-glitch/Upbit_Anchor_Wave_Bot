@@ -750,7 +750,7 @@
   - `python -m unittest test_breakout_stop_reentry.py` 3/3 PASS
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
-## 📝 [2026-09-28 16:30] 업데이트 이력 (Commit ID: PENDING)
+## 📝 [2026-09-28 16:30] 업데이트 이력 (Commit ID: 84241ae)
 - **수정 내용** (순수 미진입 감시 중 및 09:07 스캐너 실행 시 기준봉 지지선 붕괴 텔레그램 알림 일원화, 파일: `Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`, `.agents/rules/rules.md`, `README.md`):
   1. **순수 미진입 감시 중 기준봉 지지선 붕괴 알림 추가 (`Upbit_Anchor_Wave_Bot.py`)**:
      - 기존에 고가 위 청산 후 재매수 대기 모드(`is_waiting_reentry`)에서만 발송되던 `🚨 [BST 봇] 기준봉 지지선 붕괴` 텔레그램 메시지를 미진입 감시 중(`[순수 미진입 종목] is_broken == True`) 분기에도 동일한 형식으로 발송하도록 추가
