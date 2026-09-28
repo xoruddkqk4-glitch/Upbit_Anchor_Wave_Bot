@@ -464,6 +464,26 @@ def _scan_all_reference_candles_locked():
                         " (손절선 파괴로 기준봉 영구 무효화 -> 진입 제외)"
                     )
                     if not state["entry_bought"]:
+                        if prev_ref_date:
+                            is_reentry = state.get("base_price") is not None
+                            title = (
+                                "🚨 [BST 봇] 기준봉 지지선 붕괴 (재매수 대기 해제)"
+                                if is_reentry
+                                else "🚨 [BST 봇] 기준봉 지지선 붕괴 (감시 해제)"
+                            )
+                            sub_text = "대기 해제 및 상태 초기화" if is_reentry else "감시 해제 및 상태 초기화"
+                            SendMessage(
+                                f"<b>{title}</b>\n"
+                                f"• <b>종목</b>: {ticker}\n"
+                                f"• <b>현재가</b>: {format_price(curr_close)}\n"
+                                f"• <b>기준봉 저가</b>: {format_price(effective_ref_low)}\n"
+                                f"• <b>사유</b>: 기준봉의 구조적 지지선 하향 이탈로 추세 파괴 ➔ {sub_text}"
+                            )
+                            if is_reentry:
+                                state["base_price"] = None
+                                state["base_amount"] = None
+                                state["base_price_date"] = None
+                                state["trough_low"] = None
                         state["active_ref_date"] = None
                     continue
 
@@ -475,6 +495,26 @@ def _scan_all_reference_candles_locked():
                         " (무효화된 기준봉 무시)"
                     )
                     if not state["entry_bought"]:
+                        if prev_ref_date:
+                            is_reentry = state.get("base_price") is not None
+                            title = (
+                                "🚨 [BST 봇] 기준봉 지지선 붕괴 (재매수 대기 해제)"
+                                if is_reentry
+                                else "🚨 [BST 봇] 기준봉 지지선 붕괴 (감시 해제)"
+                            )
+                            sub_text = "대기 해제 및 상태 초기화" if is_reentry else "감시 해제 및 상태 초기화"
+                            SendMessage(
+                                f"<b>{title}</b>\n"
+                                f"• <b>종목</b>: {ticker}\n"
+                                f"• <b>현재가</b>: {format_price(curr_close)}\n"
+                                f"• <b>기준봉 저가</b>: {format_price(effective_ref_low)}\n"
+                                f"• <b>사유</b>: 기준봉의 구조적 지지선 하향 이탈로 추세 파괴 ➔ {sub_text}"
+                            )
+                            if is_reentry:
+                                state["base_price"] = None
+                                state["base_amount"] = None
+                                state["base_price_date"] = None
+                                state["trough_low"] = None
                         state["active_ref_date"] = None
                     continue
 
@@ -549,6 +589,13 @@ def _scan_all_reference_candles_locked():
                                 f"  [재매수 대기 해제 - 기준봉 지지 붕괴] {ticker} -> 현재가({format_price(curr_close)})"
                                 f" < 기준봉 저가({format_price(anchor_low)}) 지지 이탈"
                             )
+                            SendMessage(
+                                f"<b>🚨 [BST 봇] 기준봉 지지선 붕괴 (재매수 대기 해제)</b>\n"
+                                f"• <b>종목</b>: {ticker}\n"
+                                f"• <b>현재가</b>: {format_price(curr_close)}\n"
+                                f"• <b>기준봉 저가</b>: {format_price(anchor_low)}\n"
+                                f"• <b>사유</b>: 기준봉의 구조적 지지선 하향 이탈로 추세 파괴 ➔ 대기 해제 및 상태 초기화"
+                            )
                             state["active_ref_date"] = None
                             state["base_price"] = None
                             state["base_amount"] = None
@@ -613,6 +660,13 @@ def _scan_all_reference_candles_locked():
                             if not state.get("entry_bought"):
                                 print(
                                     f"  [손절선 기이탈 무효화] {ticker} -> 기준일: {active_ref_date} 사후 손절선 이탈 확인 감시 해제"
+                                )
+                                SendMessage(
+                                    f"<b>🚨 [BST 봇] 기준봉 지지선 붕괴 (감시 해제)</b>\n"
+                                    f"• <b>종목</b>: {ticker}\n"
+                                    f"• <b>현재가</b>: {format_price(curr_close)}\n"
+                                    f"• <b>기준봉 저가</b>: {format_price(effective_ref_low)}\n"
+                                    f"• <b>사유</b>: 기준봉의 구조적 지지선 하향 이탈로 추세 파괴 ➔ 감시 해제 및 상태 초기화"
                                 )
                                 state["active_ref_date"] = None
                         elif ref_age_days >= REF_EXPIRY_DAYS:

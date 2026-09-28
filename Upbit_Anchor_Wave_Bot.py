@@ -146,12 +146,12 @@ MIN_TAKE_PROFIT_PCT = 0.03  # 최소 보장 익절 수익률 (0.03 = +3%)
 # ─────────────────────────────────────
 # 전체 기능 사용 여부 (False로 설정 시 단계별 익절 로직 완전 비활성화)
 ENABLE_TIERED_TP = True
-# 1차 익절: +5% 상승 시 잔여 수량의 25% 시장가성 지정가 매도 (0이면 미사용)
-TIERED_TP_1_GAIN_PCT = 5
+# 1차 익절: +10% 상승 시 잔여 수량의 25% 시장가성 지정가 매도 (0이면 미사용)
+TIERED_TP_1_GAIN_PCT = 10
 TIERED_TP_1_SELL_PCT = 25
 # 2차 익절: +10% 상승 시 잔여 수량의 33% 시장가성 지정가 매도 (0이면 미사용)
-TIERED_TP_2_GAIN_PCT = 10
-TIERED_TP_2_SELL_PCT = 33
+# TIERED_TP_2_GAIN_PCT = 10
+# TIERED_TP_2_SELL_PCT = 33
 # 3차 익절: +15% 상승 시 잔여 수량의 50% 시장가성 지정가 매도 (0이면 미사용)
 # TIERED_TP_3_GAIN_PCT = 15
 # TIERED_TP_3_SELL_PCT = 50
@@ -163,7 +163,7 @@ def get_active_tiered_tp_levels():
     return []
   raw_steps = [
       (TIERED_TP_1_GAIN_PCT, TIERED_TP_1_SELL_PCT),
-      (TIERED_TP_2_GAIN_PCT, TIERED_TP_2_SELL_PCT),
+      # (TIERED_TP_2_GAIN_PCT, TIERED_TP_2_SELL_PCT),
       # (TIERED_TP_3_GAIN_PCT, TIERED_TP_3_SELL_PCT),
   ]
   levels = []
@@ -1916,6 +1916,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           print(
               f"[{ticker}] [손절선 기이탈 감시 해제] 기준일 {state['active_ref_date']} 이후 저점({broken_date_str},"
               f" {format_price(broken_low_val)}) < 손절가({format_price(effective_ref_low)}) 확인 -> 상태 초기화"
+          )
+          SendMessage(
+              f"<b>🚨 [BST 봇] 기준봉 지지선 붕괴 (감시 해제)</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>현재가</b>: {format_price(curr_close)}\n"
+              f"• <b>기준봉 저가</b>: {format_price(effective_ref_low)}\n"
+              f"• <b>사유</b>: 기준봉의 구조적 지지선 하향 이탈로 추세 파괴 ➔ 감시 해제 및 상태 초기화"
           )
           global_state[ticker] = new_ticker_state()
           return signals

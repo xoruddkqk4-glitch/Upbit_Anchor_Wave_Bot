@@ -1,4 +1,4 @@
-﻿# 🚀 Upbit Anchor Wave Bot (업비트 기준봉 & BST 매매 자동화 봇)
+# 🚀 Upbit Anchor Wave Bot (업비트 기준봉 & BST 매매 자동화 봇)
 
 업비트(Upbit) 원화(KRW) 마켓을 대상으로 **기준봉(Anchor Candle)**을 자동으로 탐색하고, **BST(Base-Symmetry-Trend / 기준봉-대칭-추세)** 알고리즘 기반으로 눌림목/돌파 진입, 대칭이론 50% 분할 익절, 5일선 추세 매도, 재매수 및 손절을 자동 집행하는 시스템입니다.
 
@@ -749,5 +749,23 @@
   - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 통과 (Exit Code 0)
   - `python -m unittest test_breakout_stop_reentry.py` 3/3 PASS
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+## 📝 [2026-09-28 16:30] 업데이트 이력 (Commit ID: PENDING)
+- **수정 내용** (순수 미진입 감시 중 및 09:07 스캐너 실행 시 기준봉 지지선 붕괴 텔레그램 알림 일원화, 파일: `Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`, `.agents/rules/rules.md`, `README.md`):
+  1. **순수 미진입 감시 중 기준봉 지지선 붕괴 알림 추가 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기존에 고가 위 청산 후 재매수 대기 모드(`is_waiting_reentry`)에서만 발송되던 `🚨 [BST 봇] 기준봉 지지선 붕괴` 텔레그램 메시지를 미진입 감시 중(`[순수 미진입 종목] is_broken == True`) 분기에도 동일한 형식으로 발송하도록 추가
+     - 지지선 이탈 시 콘솔 출력만 되고 조용히 초기화되던 현상을 해결하여 실시간 감시 투명성 확보
+  2. **09:07 스캐너 기준봉 해제 시 텔레그램 알림 연동 (`scan_ref_candles.py`)**:
+     - 아침 09:07 스캐너가 기존 `bot_state.json`에서 유효하게 감시 중이던 기준봉(`prev_ref_date` 존재)의 사후 저가 이탈(`broken_in_history`) 또는 현재가 손절선 이탈(`curr_close < effective_ref_low`)을 감지하여 해제할 때 동일한 붕괴 알림 전송
+     - 신규 기준봉 미포착 시의 기존 유지/검증(`else`) 분기에서도 재매수 대기 해제 및 순수 미진입 감시 해제 붕괴 알림 발송
+     - 기존에 감시하지 않던 일반 종목에 대한 스팸 알림을 방지하고, 봇과 스캐너 간 상태 공유를 통해 중복 알림 차단
+  3. **에이전트 규칙 동기화 (`.agents/rules/rules.md`)**:
+     - 최신 `AGENTS.md` 및 `GEMINI.md`와 실행 규칙 완전 동기화
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_breakout_stop_reentry.py` 단위 테스트 3종 전원 통과 (Ran 3 tests, OK)
+  - `python -m unittest test_manual_ref.py` 단위 테스트 10종 전원 통과 (Ran 10 tests, OK)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
 
 
