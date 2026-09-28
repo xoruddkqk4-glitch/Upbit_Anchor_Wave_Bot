@@ -2077,7 +2077,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           )
           return signals
 
-        # 완전 청산된 경우: 매도가격과 기준봉 고가(ref_high) 비교 분기
+        # 완전 청산된 경우: 매도가 vs 고가 / 원천 저가 Intact 여부로 분기
         ref_high = state.get("ref_high", 0.0)
         if ref_high > 0 and sell_price > ref_high:
           # [분기 A: 고가 위 청산]
@@ -2104,6 +2104,56 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           )
           return signals
 
+        # [분기 B: 고가 이하 청산 + 원천 저가(anchor_low) Intact]
+        # 돌파/트레일링으로 상향된 손절에만 걸린 가짜 돌파 실패.
+        # 구조적 지지(기준봉 저가)는 살아 있으므로 기준봉을 유지하고 손절선만 원천 저가로
+        # 복원한 뒤, 재매수 대기(base_price) 없이 순수 눌림목/돌파 감시로 되돌린다.
+        # (20일 만료·저가 이탈 시에만 이후 초기화 — 기존 미진입 감시 로직과 동일)
+        anchor_low = float(state.get("anchor_low") or 0.0)
+        if (
+            anchor_low > 0
+            and curr_close >= anchor_low
+            and sell_price >= anchor_low
+        ):
+          raised_stop = effective_ref_low
+          state["entry_bought"] = False
+          state["entry_date"] = None
+          state["entry_price"] = 0.0
+          state["total_volume"] = 0.0
+          state["remaining_ratio"] = 0.0
+          state["symmetry_tp_executed"] = False
+          state["price_tp_executed"] = False
+          state["scale_in_count"] = 0
+          state["last_scale_in_date"] = None
+          state["target_buy_amount"] = None
+          state["base_price"] = None
+          state["base_amount"] = None
+          state["base_price_date"] = None
+          state["wave_anchor_price"] = None
+          state["wave_anchor_date"] = None
+          state["time_sym_below_high_logged"] = False
+          state["tiered_tp_executed_levels"] = []
+          state["breakout_date"] = None
+          state["last_trailing_stop_date"] = None
+          state["trough_low"] = None
+          state["effective_ref_low"] = anchor_low
+          print(
+              f"[{ticker}] [돌파 손절 -> 기준봉 유지/눌림목 재개] 매도가({format_price(sell_price)})"
+              f" <= 고가({format_price(ref_high)}) 이나 원천 저가({format_price(anchor_low)}) Intact"
+              f" -> 손절선 {format_price(raised_stop)} -> {format_price(anchor_low)} 복원,"
+              f" 기준봉({state['active_ref_date']}) 유지"
+          )
+          SendMessage(
+              f"<b>🔄 [BST 봇] 돌파 손절 ➔ 기준봉 유지 / 눌림목 감시 재개</b>\n"
+              f"• <b>종목</b>: {ticker}\n"
+              f"• <b>매도가</b>: {format_price(sell_price)} (기준봉 고가 {format_price(ref_high)} 이하)\n"
+              f"• <b>손절선 복원</b>: {format_price(raised_stop)} ➔ <b>{format_price(anchor_low)}</b> (원천 저가 Intact)\n"
+              f"• <b>기준봉</b>: {state['active_ref_date']} 유지 (고가 {format_price(ref_high)} | 중심가 {format_price(state.get('ref_mid', 0.0))} | 손절가 {format_price(anchor_low)})\n"
+              f"• <b>내용</b>: 상향 손절(돌파/트레일링)만 이탈, 구조적 지지는 유효 ➔ 포지션만 정리 후 눌림목·돌파 재감시"
+          )
+          return signals
+
+      # [분기 C: 원천 저가 파괴(또는 anchor_low 부재) / 미보유 손절선 이탈]
       global_state[ticker] = new_ticker_state()
       return signals
 

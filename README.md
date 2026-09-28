@@ -18,7 +18,7 @@
    - **재매수 (Re-Entry)**: 5일선 꺾임으로 매도 후, 하이브리드 재돌파/반등 시 직전 매도 회수 금액(`base_amount`, 최대 50만 원) 전액 재매수
    - **분할 익절**: 파동 시간/가격 대칭 달성 및 최소 +3% 수익률 충족 시 보유 수량 50% 분할 매도
    - **추세 매도**: 5일 이동평균선(MA5) 꺾임 시 잔여 수량 전량 매도
-   - **손절가**: 세력 마진노선인 기준봉 저가(`effective_ref_low`) 하향 이탈 시 전량 손절 및 기준봉 상태 초기화 (돌파 진입 시: 기준봉 고가 -2% 완충 버퍼 및 진입가 -5% 상한선 하이브리드 적용)
+   - **손절가**: 돌파 진입 시 고가 -2% / 진입가 -5% 하이브리드로 손절선 상향. 상향 손절만 이탈하고 원천 저가(`anchor_low`) Intact이면 **기준봉 유지 + 손절선 원천 저가 복원 후 눌림목·돌파 재감시**. 원천 저가까지 이탈하거나 20일 만료 시에만 기준봉 상태 초기화. 고가 위 청산 시에는 재매수 대기 모드로 전환
 
 4. **슬리피지 방지 및 미체결 제어**
    - 매수/매도 시 최우선 호가 기준 ±0.5% 슬리피지 제한 지정가 주문 적용
@@ -735,6 +735,19 @@
   - `python -m py_compile telegram_commander.py test_manual_ref.py` 정적 구문 검사 통과 (Exit Code 0)
   - `python -m unittest test_manual_ref.py` 10개 단위 테스트 전원 통과 (Ran 10 tests in 0.043s, OK)
   - `python -m unittest test_breakout_stop_reentry.py` 회귀 테스트 전원 통과 (OK)
+  - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+
+## 📝 [2026-09-28 09:20] 업데이트 이력 (Commit ID: 9bb07c5)
+- **수정 내용** (돌파 손절 후 원천 저가 Intact 시 기준봉 유지·눌림목 재개, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_breakout_stop_reentry.py`, `README.md`):
+  1. **손절 완전 청산 분기 삼원화 (A/B/C)**:
+     - **[분기 A: 고가 위 청산 (`sell_price > ref_high`)]**: 기존과 동일 — `base_price` 기록 후 재매수 대기 모드
+     - **[분기 B: 고가 이하 + 원천 저가 Intact]**: 돌파/트레일링으로 상향된 손절에만 걸린 경우 포지션만 정리하고 `effective_ref_low`를 `anchor_low`로 복원, `base_price` 없이 기준봉을 유지하여 눌림목·돌파 재감시 (이후 초기화는 20일 만료 또는 원천 저가 이탈 시)
+     - **[분기 C: 원천 저가 파괴]**: `new_ticker_state()`로 상태 완전 초기화
+  2. **단위 테스트 갱신 (`test_breakout_stop_reentry.py`)**: Intact 유지 / 저가 파괴 초기화 / 고가 위 재매수 대기 3종 검증
+  3. **README 주요 특징 손절 설명**을 위 분기 동작에 맞게 갱신
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 통과 (Exit Code 0)
+  - `python -m unittest test_breakout_stop_reentry.py` 3/3 PASS
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
 
