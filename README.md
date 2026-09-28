@@ -1,4 +1,4 @@
-# 🚀 Upbit Anchor Wave Bot (업비트 기준봉 & BST 매매 자동화 봇)
+﻿# 🚀 Upbit Anchor Wave Bot (업비트 기준봉 & BST 매매 자동화 봇)
 
 업비트(Upbit) 원화(KRW) 마켓을 대상으로 **기준봉(Anchor Candle)**을 자동으로 탐색하고, **BST(Base-Symmetry-Trend / 기준봉-대칭-추세)** 알고리즘 기반으로 눌림목/돌파 진입, 대칭이론 50% 분할 익절, 5일선 추세 매도, 재매수 및 손절을 자동 집행하는 시스템입니다.
 
@@ -737,7 +737,7 @@
   - `python -m unittest test_breakout_stop_reentry.py` 회귀 테스트 전원 통과 (OK)
   - `.env`, `service_account.json` 비밀 파일 Git 미추적 상태 유지 확인 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
-## 📝 [2026-09-28 09:20] 업데이트 이력 (Commit ID: 9bb07c5)
+## 📝 [2026-09-28 09:20] 업데이트 이력 (Commit ID: fdf8a66)
 - **수정 내용** (돌파 손절 후 원천 저가 Intact 시 기준봉 유지·눌림목 재개, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_breakout_stop_reentry.py`, `README.md`):
   1. **손절 완전 청산 분기 삼원화 (A/B/C)**:
      - **[분기 A: 고가 위 청산 (`sell_price > ref_high`)]**: 기존과 동일 — `base_price` 기록 후 재매수 대기 모드
