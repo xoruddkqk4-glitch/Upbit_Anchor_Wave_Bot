@@ -19,7 +19,7 @@ description: Triggered by '/ask', '/action ask', or requests starting with '/ask
 
 3. **계획서 자동 실행 절대 금지 (Never Auto-Execute Plan)**:
    - `/ask` 모드로 작성된 계획서는 시스템 정책 등에 의해 자동 승인(Auto-Approve/Proceed) 되더라도 **절대로 자동으로 코드를 수정/실행해서는 안 됩니다**.
-   - 계획서 작성 후 반드시 사용자의 **명시적 추가 대화 응답("실행해줘", "코드 반영해줘" 등)**이 있을 때까지 대기합니다.
+   - 계획서 작성 후 반드시 사용자의 **명시적 추가 명령(`/apply`, "반영해줘" 등)**이 있을 때까지 대기합니다.
 
 ## 📋 수행 절차 (Workflow)
 
@@ -29,4 +29,4 @@ description: Triggered by '/ask', '/action ask', or requests starting with '/ask
    - **단순 질의**: 코드 수정 없이 질문에 정확하고 명쾌하게 답변합니다.
    - **복잡한 작업/구현 요청**: `implementation_plan.md` 아티팩트에 분석 결과와 구현 계획을 작성합니다.
 3. **완료 및 사용자 승인 대기**:
-   - 답변 또는 계획서 링크를 사용자에게 제공하고, 사용자의 명시적인 추가 실행 요청 전까지 작업을 정지하고 대기합니다.
+   - 답변 또는 계획서 링크를 사용자에게 제공하고, 사용자의 명시적인 추가 실행 요청(`/apply` 등) 전까지 작업을 정지하고 대기합니다.

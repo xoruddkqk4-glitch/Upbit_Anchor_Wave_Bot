@@ -2053,16 +2053,30 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             "Reason": reason_desc,
         })
 
-        # 텔레그램 매도 알림
-        SendMessage(
-            f"<b>{title}</b>\n"
-            f"• <b>종목</b>: {ticker}\n"
-            f"• <b>매도가</b>: {format_price(sell_price)}\n"
-            f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
-            f"• <b>매도 사유</b>: {reason_desc}\n"
-            f"{fill_note}\n"
-            f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+        # 분기 사전 판정:
+        # 고가 위 청산(분기 A) 또는 기준봉 유지 돌파 손절(분기 B)인 경우,
+        # 1차 매도 알림을 보내지 않고 해당 분기에서 체결 정보와 후속 조치가 결합된 단일 통합 알림을 발송
+        ref_high = state.get("ref_high", 0.0)
+        anchor_low = float(state.get("anchor_low") or 0.0)
+        is_branch_a = (not fill_note) and (ref_high > 0 and sell_price > ref_high)
+        is_branch_b = (
+            (not fill_note)
+            and (anchor_low > 0)
+            and (curr_close >= anchor_low)
+            and (sell_price >= anchor_low)
         )
+
+        # 텔레그램 매도 알림 (분기 A, B는 하단에서 통합 메시지로 1회만 전송)
+        if not (is_branch_a or is_branch_b):
+            SendMessage(
+                f"<b>{title}</b>\n"
+                f"• <b>종목</b>: {ticker}\n"
+                f"• <b>매도가</b>: {format_price(sell_price)}\n"
+                f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
+                f"• <b>매도 사유</b>: {reason_desc}\n"
+                f"{fill_note}\n"
+                f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
+            )
 
         save_trade_to_google_sheet(
             ticker=ticker,
@@ -2107,7 +2121,10 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f"<b>🔄 [BST 봇] 고가 위 청산 ➔ 재매수 대기 모드 진입</b>\n"
               f"• <b>종목</b>: {ticker}\n"
               f"• <b>매도가</b>: {format_price(sell_price)} (기준봉 고가 {format_price(ref_high)} 상회)\n"
-              f"• <b>내용</b>: 고점 위 청산 휩소 방지 ➔ 직전 매도가({format_price(sell_price)}) 재돌파 및 5일선 우상향 시에만 재매수 감시"
+              f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
+              f"• <b>매도 사유</b>: {reason_desc}\n"
+              f"• <b>내용</b>: 고점 위 청산 휩소 방지 ➔ 직전 매도가({format_price(sell_price)}) 재돌파 및 5일선 우상향 시에만 재매수 감시\n"
+              f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
           return signals
 
@@ -2151,12 +2168,15 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f" 기준봉({state['active_ref_date']}) 유지"
           )
           SendMessage(
-              f"<b>🔄 [BST 봇] 돌파 손절 ➔ 기준봉 유지 / 눌림목 감시 재개</b>\n"
+              f"<b>🔴🔄 [BST 봇] 돌파 손절 매도 ➔ 기준봉 유지 / 눌림목 감시 재개</b>\n"
               f"• <b>종목</b>: {ticker}\n"
               f"• <b>매도가</b>: {format_price(sell_price)} (기준봉 고가 {format_price(ref_high)} 이하)\n"
+              f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
+              f"• <b>매도 사유</b>: {reason_desc}\n"
               f"• <b>손절선 복원</b>: {format_price(raised_stop)} ➔ <b>{format_price(anchor_low)}</b> (원천 저가 Intact)\n"
               f"• <b>기준봉</b>: {state['active_ref_date']} 유지 (고가 {format_price(ref_high)} | 중심가 {format_price(state.get('ref_mid', 0.0))} | 손절가 {format_price(anchor_low)})\n"
-              f"• <b>내용</b>: 상향 손절(돌파/트레일링)만 이탈, 구조적 지지는 유효 ➔ 포지션만 정리 후 눌림목·돌파 재감시"
+              f"• <b>내용</b>: 상향 손절(돌파/트레일링)만 이탈, 구조적 지지는 유효 ➔ 포지션만 정리 후 눌림목·돌파 재감시\n"
+              f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
           return signals
 

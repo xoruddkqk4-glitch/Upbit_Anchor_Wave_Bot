@@ -767,5 +767,17 @@
   - `python -m unittest test_manual_ref.py` 단위 테스트 10종 전원 통과 (Ran 10 tests, OK)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
-
-
+## 📝 [2026-09-29 09:20] 업데이트 이력 (Commit ID: b3f41ce)
+- **수정 내용** (돌파 손절 및 고가 위 청산 시 텔레그램 매도 알림과 상태 전이 알림 단일 통합, 파일: `Upbit_Anchor_Wave_Bot.py`, `README.md`):
+  1. **돌파 손절 알림 일원화 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기존에는 돌파 손절 발생 시 1차 매도 체결 알림(`🔴 시장가 손절 매도!`)과 2차 상태 업데이트 알림(`🔄 돌파 손절 ➔ 기준봉 유지...`)이 2회 분리 발송되던 문제를 해결
+     - 분기 사전 판정(`is_branch_b`: 상향 손절 이탈 + 원천 저가 Intact)을 도입하여 1차 알림을 건너뛰고, 체결 정보(종목, 매도가, 실현손익, 매도 사유, 주문 모드)와 기준봉 상태(손절선 복원, 기준봉 현황, 후속 조치 내용)가 모두 포함된 단일 통합 메시지(`🔴🔄 [BST 봇] 돌파 손절 매도 ➔ 기준봉 유지 / 눌림목 감시 재개`)로 발송하도록 개선
+  2. **고가 위 청산 알림 일원화 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 고가 위 청산(`is_branch_a`: `sell_price > ref_high`) 시에도 1차 매도 알림을 건너뛰고, 실현손익과 매도 사유, 주문 모드가 결합된 통합 알림(`🔄 [BST 봇] 고가 위 청산 ➔ 재매수 대기 모드 진입`) 1회만 발송하도록 일관성 확보
+  3. **원천 저가 파괴(완전 손절) 및 부분 체결 무결성 보존**:
+     - 구조적 지지가 붕괴된 완전 손절(분기 C) 및 부분 체결(`fill_note`) 시에는 기존의 단독 매도 알림이 정상적으로 발송되도록 안전 분기 유지
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_breakout_stop_reentry.py` 기존 단위 테스트 3종 전원 통과 (OK)
+  - `verify_unified_message.py` 시뮬레이션 검증 수행: `KRW-ONDO` 실제 파라미터 기준 텔레그램 발송 횟수 1회로 감소 확인 및 필수 필드 정상 주입 완료 (PASS)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
