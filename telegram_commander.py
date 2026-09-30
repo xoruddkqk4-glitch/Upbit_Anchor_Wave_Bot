@@ -247,9 +247,10 @@ def handle_status_command(chat_id):
     # 3. 미보유 코인 중 기준봉이 없는 코인의 경우: 코인명 정보만
     avail_info = get_available_tickers(STATE_FILE)
     ticker_ref_dates = avail_info.get("ticker_ref_dates", {})
+    ticker_reentry_map = avail_info.get("ticker_reentry_map", {})
     unregistered_tickers = [
         ticker for _, ticker in avail_info["tickers_list"]
-        if not ticker_ref_dates.get(ticker)
+        if not ticker_ref_dates.get(ticker) and not ticker_reentry_map.get(ticker, False)
     ]
     coin_names = [t.replace("KRW-", "") for t in unregistered_tickers]
 
@@ -287,18 +288,20 @@ def handle_setref_command(chat_id, args=""):
 
             state_before = load_state(STATE_FILE)
             prev_ref = state_before.get(ticker, {}).get("active_ref_date")
+            was_reentry = state_before.get(ticker, {}).get("base_price") is not None
             send_message(chat_id, f"⏳ <b>[{ticker}]</b> {date_arg} 일봉 데이터 검증 중...")
             ok, result = validate_and_register_manual_ref(ticker, date_arg, STATE_FILE)
             if ok:
-                send_registration_success(chat_id, result, prev_ref=prev_ref)
+                send_registration_success(chat_id, result, prev_ref=prev_ref, was_reentry=was_reentry)
             else:
                 send_message(chat_id, f"{result}")
             return
 
-    # 2. 대화형 인터페이스: 미보유 코인 목록 및 인라인 버튼 안내 (신규 등록 및 최신 갱신 통합)
+    # 2. 대화형 인터페이스: 미보유 코인 목록 및 인라인 버튼 안내 (신규 등록, 기존 감시 갱신, 재매수 대기 갱신 통합)
     avail_info = get_available_tickers(STATE_FILE)
     tickers_list = avail_info["tickers_list"]
     ticker_ref_dates = avail_info.get("ticker_ref_dates", {})
+    ticker_reentry_map = avail_info.get("ticker_reentry_map", {})
 
     if not tickers_list:
         send_message(
@@ -315,7 +318,11 @@ def handle_setref_command(chat_id, args=""):
     for num, ticker in tickers_list:
         symbol = ticker.replace("KRW-", "")
         curr_ref = ticker_ref_dates.get(ticker)
-        if curr_ref:
+        is_reentry = ticker_reentry_map.get(ticker, False)
+
+        if is_reentry:
+            status_desc = f" <code>(재매수 대기: {curr_ref} ➔ 갱신)</code>" if curr_ref else " <code>(재매수 대기 ➔ 갱신)</code>"
+        elif curr_ref:
             status_desc = f" <code>({curr_ref} 갱신)</code>"
         else:
             status_desc = " <i>(신규)</i>"
@@ -333,7 +340,7 @@ def handle_setref_command(chat_id, args=""):
         "<b>📌 [BST 봇] 수동 기준봉 등록 및 최신 갱신</b>\n\n"
         "아래 버튼을 터치하거나 번호(예: <code>1</code>)를 텍스트로 입력하세요:\n\n"
         + "\n".join(text_list_lines)
-        + "\n\n<i>※ 매수 보유 중인 포지션은 손절선 보호를 위해 노출되지 않습니다.</i>"
+        + "\n\n<i>※ 실제 매수 보유 중인 포지션만 손절선 보호를 위해 제외됩니다.</i>"
         + "\n<i>취소하려면 /cancel 을 입력하세요.</i>"
     )
 
@@ -360,14 +367,23 @@ def handle_ticker_selected(chat_id, ticker):
     state = load_state(STATE_FILE)
     st = state.get(ticker, {})
     curr_ref = st.get("active_ref_date")
-    ref_desc = (
-        f"• <b>현재 기준일</b>: <code>{curr_ref}</code> (새 날짜 입력 시 최신봉으로 갱신)\n"
-        if curr_ref
-        else "• <b>현재 상태</b>: 기준봉 미등록 (신규 등록)\n"
-    )
+    base_price = st.get("base_price")
+
+    if base_price is not None:
+        ref_desc = (
+            f"• <b>현재 상태</b>: 🔄 <b>재매수 대기 중</b>\n"
+            f"• <b>기존 기준일</b>: <code>{curr_ref or '미지정'}</code> (직전 매도가/기준가: {format_price(base_price)})\n"
+            f"💡 <i>새 날짜 입력 시 기존 재매수 대기는 안전하게 해제되고 새 기준봉 사다리로 새 출발합니다.</i>\n"
+        )
+    elif curr_ref:
+        ref_desc = (
+            f"• <b>현재 기준일</b>: <code>{curr_ref}</code> (새 날짜 입력 시 최신봉으로 갱신)\n"
+        )
+    else:
+        ref_desc = "• <b>현재 상태</b>: 기준봉 미등록 (신규 등록)\n"
 
     msg = (
-        f"선택된 코인: <b>{ticker}</b>\n"
+        f"선택된 코인: <b>{ticker}</b>\n\n"
         f"{ref_desc}\n"
         f"지정할 기준봉의 날짜를 입력해주세요.\n"
         f"• <b>입력 형식</b>: <code>YYYY-MM-DD</code> (예: <code>2026-03-15</code>)\n"
@@ -388,19 +404,20 @@ def handle_date_input(chat_id, date_str):
 
     state_before = load_state(STATE_FILE)
     prev_ref = state_before.get(ticker, {}).get("active_ref_date")
+    was_reentry = state_before.get(ticker, {}).get("base_price") is not None
 
     send_message(chat_id, f"⏳ <b>[{ticker}]</b> {date_str} 일봉 데이터 조회 및 손절선 검증 중...")
 
     ok, result = validate_and_register_manual_ref(ticker, date_str, STATE_FILE)
     if ok:
         user_sessions.pop(chat_id, None)
-        send_registration_success(chat_id, result, prev_ref=prev_ref)
+        send_registration_success(chat_id, result, prev_ref=prev_ref, was_reentry=was_reentry)
     else:
         msg = f"{result}\n\n👉 <i>다른 날짜를 다시 입력하시거나, 취소하려면 /cancel 을 입력하세요.</i>"
         send_message(chat_id, msg)
 
 
-def send_registration_success(chat_id, res, prev_ref=None):
+def send_registration_success(chat_id, res, prev_ref=None, was_reentry=False):
     """등록 성공 축하 및 상세 안내 메시지"""
     ticker = res["ticker"]
     ref_date = res["ref_date"]
@@ -413,7 +430,9 @@ def send_registration_success(chat_id, res, prev_ref=None):
     rise_dur = res["rise_duration"]
     curr_c = res["curr_close"]
 
-    if prev_ref and prev_ref != ref_date:
+    if was_reentry:
+        title = f"🔄 <b>[{ticker}] 재매수 대기 해제 및 새 기준봉 등록 완료!</b>\n• <b>이전 상태</b>: 재매수 대기({prev_ref or '미지정'}) ➔ <b>새 기준일: {ref_date}</b>"
+    elif prev_ref and prev_ref != ref_date:
         title = f"🔄 <b>[{ticker}] 기준봉 최신 갱신 완료!</b>\n• <b>이전 기준일</b>: {prev_ref} ➔ <b>새 기준일: {ref_date}</b>"
     else:
         title = f"🎉 <b>[{ticker}] 수동 기준봉 등록 완료!</b>\n• <b>기준일</b>: {ref_date}"

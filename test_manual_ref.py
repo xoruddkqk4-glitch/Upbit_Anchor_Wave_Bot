@@ -17,7 +17,7 @@ class TestManualRefManager(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
         self.test_state_file = os.path.join(self.test_dir, "test_bot_state.json")
-        # 더미 상태 데이터 준비 (KRW-NEAR: 보유 중, KRW-WAVES: 기준봉 등록 중)
+        # 더미 상태 데이터 준비 (KRW-NEAR: 보유 중, KRW-WAVES: 기준봉 등록 중, KRW-PEPE: 재매수 대기 중)
         dummy_state = {
             "KRW-NEAR": {
                 "active_ref_date": "2026-09-06",
@@ -29,6 +29,12 @@ class TestManualRefManager(unittest.TestCase):
                 "entry_bought": False,
                 "remaining_ratio": 1.0,
             },
+            "KRW-PEPE": {
+                "active_ref_date": "2026-09-21",
+                "entry_bought": False,
+                "remaining_ratio": 0.0,
+                "base_price": 0.00606,
+            },
         }
         with open(self.test_state_file, "w", encoding="utf-8") as f:
             json.dump(dummy_state, f)
@@ -37,11 +43,12 @@ class TestManualRefManager(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_get_available_tickers(self):
-        """보유 중인 종목은 제외하고, 미보유 종목(신규 및 기존 기준봉 등록 종목)은 목록에 올바르게 포함하는지 확인"""
+        """보유 중인 종목은 제외하고, 미보유 종목(신규, 기존 기준봉 등록, 재매수 대기)은 목록에 올바르게 포함하는지 확인"""
         res = ref_manager.get_available_tickers(self.test_state_file)
         avail = res["tickers_list"]
         num_map = res["num_to_ticker"]
         ref_dates = res.get("ticker_ref_dates", {})
+        reentry_map = res.get("ticker_reentry_map", {})
 
         # KRW-NEAR(보유 중)는 손절선 보호를 위해 제외되어야 함
         tickers = [t for _, t in avail]
@@ -50,6 +57,12 @@ class TestManualRefManager(unittest.TestCase):
         # KRW-WAVES(미보유이나 기준봉 있음)는 최신 갱신 가능하므로 포함되어야 함
         self.assertIn("KRW-WAVES", tickers)
         self.assertEqual(ref_dates.get("KRW-WAVES"), "2026-09-08")
+        self.assertFalse(reentry_map.get("KRW-WAVES"))
+
+        # KRW-PEPE(재매수 대기 중)도 최신 갱신 가능하므로 포함되고 재매수 플래그가 True여야 함
+        self.assertIn("KRW-PEPE", tickers)
+        self.assertEqual(ref_dates.get("KRW-PEPE"), "2026-09-21")
+        self.assertTrue(reentry_map.get("KRW-PEPE"))
 
         # 번호가 1부터 순차적으로 매핑되는지 확인
         self.assertEqual(avail[0][0], 1)

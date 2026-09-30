@@ -805,3 +805,23 @@
   - 상태별(미등록/미보유 갱신/보유 중 제외) 로직 시뮬레이션 및 포맷 조립 테스트 통과
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
 
+## 📝 [2026-09-30 13:51] 업데이트 이력 (Commit ID: 4fceb94)
+- **수정 내용** (텔레그램 /setref 수동 기준봉 갱신 목록에 재매수 대기 종목 포함 및 기존 기준일 표시 연동, 파일: `ref_manager.py`, `telegram_commander.py`, `test_manual_ref.py`, `README.md`):
+  1. **수동 기준봉 등록 대상에 '재매수 대기' 종목 포함 (`ref_manager.py`)**:
+     - `get_available_tickers`에서 현금 100% 상태인 재매수 대기 종목(`base_price is not None`) 제외 조건을 해제하여 사용자가 최신 기준봉으로 새 출발을 원할 때 직접 갱신할 수 있도록 허용
+     - 오직 실제 매수 물량이 묶여 있는 보유 포지션(`is_holding`)만 손절선 왜곡 방지를 위해 제외
+     - `ticker_reentry_map` 및 `ticker_ref_dates`를 함께 반환하여 종목별 상태 상세 제공
+  2. **텔레그램 `/setref` 대화형 메뉴 기존 기준일 및 재매수 상태 표시 (`telegram_commander.py`)**:
+     - **대화형 목록 태그 고도화**: 재매수 대기 종목에 `(재매수 대기: YYYY-MM-DD ➔ 갱신)` 태그를 적용하여 기존 기준일 날짜를 목록에서 즉시 확인할 수 있도록 개선
+     - **선택 화면 안내**: 재매수 대기 종목 선택 시 기존 기준일 및 직전 매도가(기준가)를 명시하고, 새 날짜 입력 시 기존 재매수 대기는 해제되고 새 기준봉으로 새 출발함을 안내
+     - **성공 알림 분기**: 재매수 대기에서 새 기준봉으로 갱신 시 `🔄 [KRW-XXX] 재매수 대기 해제 및 새 기준봉 등록 완료!`로 메시지 분기
+     - **`/status` 명령어 동기화**: `[3. 미보유 코인 (기준봉 X)]` 섹션에서 재매수 대기 종목이 중복되지 않도록 필터링 보강
+  3. **단위 테스트 스위트 동기화 (`test_manual_ref.py`)**:
+     - `setUp`에 `KRW-PEPE`(재매수 대기) 더미 데이터를 추가하고, `test_get_available_tickers`에서 보유 코인 제외, 재매수 대기 및 기존 감시 코인 정상 포함 검증 (10/10 PASS)
+- **검증 결과**:
+  - `python -m py_compile ref_manager.py telegram_commander.py test_manual_ref.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_manual_ref.py` 10개 단위 테스트 전 항목 100% 통과 (Ran 10 tests, OK)
+  - 실계좌 `bot_state.json` 기반 15개 미보유 코인(재매수 대기 코인 4종 포함) 및 5개 보유 코인 제외 시뮬레이션 검증 완료
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
+

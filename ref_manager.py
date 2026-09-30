@@ -101,14 +101,15 @@ def save_state(state, state_file=STATE_FILE):
 
 
 def get_available_tickers(state_file=STATE_FILE):
-    """기준봉 수동 등록 및 최신 갱신이 가능한 미보유 코인 목록을 순번과 함께 반환.
+    """기준봉 수동 등록 및 최신 갱신이 가능한 미보유 코인 목록을 순번과 함께 반환 (재매수 대기 코인 포함).
 
     반환:
         dict: {
             "tickers_list": [(1, "KRW-BTC"), (2, "KRW-ETH"), ...],
             "num_to_ticker": {1: "KRW-BTC", 2: "KRW-ETH", ...},
             "ticker_to_num": {"KRW-BTC": 1, "KRW-ETH": 2, ...},
-            "ticker_ref_dates": {"KRW-BTC": None, "KRW-ETH": "2026-09-20", ...}
+            "ticker_ref_dates": {"KRW-BTC": "2026-09-21", "KRW-ADA": None, ...},
+            "ticker_reentry_map": {"KRW-BTC": True, "KRW-ADA": False, ...}
         }
     """
     state = load_state(state_file)
@@ -116,17 +117,18 @@ def get_available_tickers(state_file=STATE_FILE):
 
     available = []
     ticker_ref_dates = {}
+    ticker_reentry_map = {}
     for ticker in targets:
         if ticker in EXCLUDE_TICKERS:
             continue
         st = state.get(ticker, {})
-        # 실제 매수 보유 중이거나 재매수 대기 중인 종목만 제외하고, 미보유 상태인 모든 종목은 신규 등록/최신 갱신 대상에 포함
+        # 실제 매수 물량이 묶여 있는 보유 포지션만 제외하고, 현금 100% 상태인 모든 코인(신규 + 기존 감시 + 재매수 대기)을 대상에 포함
         is_holding = st.get("entry_bought", False) and st.get("remaining_ratio", 0) > 0
-        is_reentry = st.get("base_price") is not None
 
-        if not is_holding and not is_reentry:
+        if not is_holding:
             available.append(ticker)
             ticker_ref_dates[ticker] = st.get("active_ref_date")
+            ticker_reentry_map[ticker] = (st.get("base_price") is not None)
 
     num_to_ticker = {i + 1: ticker for i, ticker in enumerate(available)}
     ticker_to_num = {ticker: i + 1 for i, ticker in enumerate(available)}
@@ -137,6 +139,7 @@ def get_available_tickers(state_file=STATE_FILE):
         "num_to_ticker": num_to_ticker,
         "ticker_to_num": ticker_to_num,
         "ticker_ref_dates": ticker_ref_dates,
+        "ticker_reentry_map": ticker_reentry_map,
     }
 
 
