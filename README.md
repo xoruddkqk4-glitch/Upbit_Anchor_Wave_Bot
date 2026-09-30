@@ -781,3 +781,27 @@
   - `python -m unittest test_breakout_stop_reentry.py` 기존 단위 테스트 3종 전원 통과 (OK)
   - `verify_unified_message.py` 시뮬레이션 검증 수행: `KRW-ONDO` 실제 파라미터 기준 텔레그램 발송 횟수 1회로 감소 확인 및 필수 필드 정상 주입 완료 (PASS)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
+## 📝 [2026-09-30 13:14] 업데이트 이력 (Commit ID: 974fca4)
+- **수정 내용** (09:07 스캔 보고서 종목 목록 추가 및 텔레그램 /setref 대화형 메뉴 미보유 종목 최신 갱신 지원, 파일: `scan_ref_candles.py`, `ref_manager.py`, `telegram_commander.py`, `test_manual_ref.py`, `README.md`):
+  1. **09:07 KST 기준봉 감시 현황 보고서 유효/미발생 종목 목록 추가 (`scan_ref_candles.py`)**:
+     - 개별 종목 상세 카드(가격 사다리) 진입 전 상단 요약부 '총 유효 기준봉' 아래에 **기준봉 유효 종목명 목록**과 **기준봉 없는 종목명 목록** 추가
+     - 모바일 화면 가독성을 위해 `KRW-` 접두어를 생략한 간결한 심볼명 리스트(`BTC, ETH, SOL...`)로 포맷팅
+     - `• 기준봉 유효 종목(2): BTC, ETH`, `• 기준봉 없는 종목(18): XRP, SOL, ...` 형태로 전체 감시 대상(20개)의 현황을 한눈에 파악할 수 있도록 개선
+     - 유효 기준봉이 0개인 경우(`empty_msg`)에도 통일된 포맷으로 감시 종목 목록 표시
+  2. **수동 기준봉 등록 대상 미보유 종목 확장 (`ref_manager.py`)**:
+     - `get_available_tickers`에서 기존의 `has_ref(기준봉 있음)` 제외 조건을 완화하여, 실제 매수 포지션 보유 중인 종목만 제외하고 미보유 상태인 모든 감시 코인을 등록/갱신 대상에 포함
+     - 각 코인별 현재 기준봉 등록 정보(`ticker_ref_dates`)를 딕셔너리로 함께 반환하도록 확장
+  3. **텔레그램 `/setref` 대화형 메뉴 미보유 종목 최신 갱신 연동 (`telegram_commander.py`)**:
+     - **대화형 메뉴 직관화**: 코인 목록에 `(신규)` vs `(YYYY-MM-DD 갱신)` 태그를 표기하여 신규 등록 종목과 기존 기준봉 갱신 종목을 명확히 구분
+     - **날짜 입력 안내 개선**: 코인 선택 시 현재 등록된 기준일을 안내하고 새 날짜 입력 시 최신봉으로 갱신됨을 명시
+     - **성공 알림 고도화**: 기존 기준봉을 갱신한 경우 `🔄 [KRW-XXX] 기준봉 최신 갱신 완료! (이전 기준일 ➔ 새 기준일)`로 알림 분기
+     - **`/status` 명령어 동기화**: `[3. 미보유 코인 (기준봉 X)]` 섹션에서 `ticker_ref_dates`를 확인하여 순수 기준봉 미등록 코인만 정확히 필터링되도록 보정
+  4. **단위 테스트 스위트 동기화 (`test_manual_ref.py`)**:
+     - `test_get_available_tickers` 단위 테스트를 정책에 맞게 동기화 (보유 중인 `KRW-NEAR` 제외, 미보유 감시 중인 `KRW-WAVES` 정상 포함 검증)
+- **검증 결과**:
+  - `python -m py_compile scan_ref_candles.py ref_manager.py telegram_commander.py test_manual_ref.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_manual_ref.py` 10개 단위 테스트 전 항목 100% 통과 (Ran 10 tests, OK)
+  - 상태별(미등록/미보유 갱신/보유 중 제외) 로직 시뮬레이션 및 포맷 조립 테스트 통과
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 미변경, 실주문 API 미호출)
+

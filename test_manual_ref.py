@@ -37,15 +37,19 @@ class TestManualRefManager(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_get_available_tickers(self):
-        """보유 중이거나 기준봉이 등록된 종목을 제외하고 번호 목록을 올바르게 생성하는지 확인"""
+        """보유 중인 종목은 제외하고, 미보유 종목(신규 및 기존 기준봉 등록 종목)은 목록에 올바르게 포함하는지 확인"""
         res = ref_manager.get_available_tickers(self.test_state_file)
         avail = res["tickers_list"]
         num_map = res["num_to_ticker"]
+        ref_dates = res.get("ticker_ref_dates", {})
 
-        # KRW-NEAR와 KRW-WAVES는 제외되어야 함
+        # KRW-NEAR(보유 중)는 손절선 보호를 위해 제외되어야 함
         tickers = [t for _, t in avail]
         self.assertNotIn("KRW-NEAR", tickers)
-        self.assertNotIn("KRW-WAVES", tickers)
+
+        # KRW-WAVES(미보유이나 기준봉 있음)는 최신 갱신 가능하므로 포함되어야 함
+        self.assertIn("KRW-WAVES", tickers)
+        self.assertEqual(ref_dates.get("KRW-WAVES"), "2026-09-08")
 
         # 번호가 1부터 순차적으로 매핑되는지 확인
         self.assertEqual(avail[0][0], 1)

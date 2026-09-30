@@ -707,6 +707,15 @@ def _scan_all_reference_candles_locked():
 
     # 텔레그램 일괄(단일) 메시지 발송
     now_kst = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    valid_tickers = [c["ticker"] for c in all_reported_candles]
+    no_ref_tickers = [t for t in target_tickers if t not in valid_tickers]
+
+    def to_symbol(t: str) -> str:
+        return t.split("-")[-1] if "-" in t else t
+
+    valid_symbols_str = ", ".join(to_symbol(t) for t in valid_tickers) if valid_tickers else "없음"
+    no_ref_symbols_str = ", ".join(to_symbol(t) for t in no_ref_tickers) if no_ref_tickers else "없음"
+
     if all_reported_candles:
         new_count = sum(1 for c in all_reported_candles if c["tag"] in ["신규 포착", "최신 갱신"])
         keep_count = sum(1 for c in all_reported_candles if c["tag"] in ["감시 중", "보유 중", "재매수 대기"])
@@ -715,6 +724,8 @@ def _scan_all_reference_candles_locked():
             "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>\n"
             f"• <b>스캔 일시</b>: {now_kst}\n"
             f"• <b>총 유효 기준봉</b>: <b>{len(all_reported_candles)}개</b> (신규/갱신: {new_count}개 | 감시/보유 중: {keep_count}개)\n"
+            f"• <b>기준봉 유효 종목({len(valid_tickers)})</b>: {valid_symbols_str}\n"
+            f"• <b>기준봉 없는 종목({len(no_ref_tickers)})</b>: {no_ref_symbols_str}\n"
             "----------------------------------------"
         )
 
@@ -788,6 +799,10 @@ def _scan_all_reference_candles_locked():
         empty_msg = (
             "<b>📊 [BST 봇] 09:07 KST 기준봉 감시 현황 보고</b>\n"
             f"• <b>스캔 일시</b>: {now_kst}\n"
+            "• <b>총 유효 기준봉</b>: <b>0개</b>\n"
+            "• <b>기준봉 유효 종목(0)</b>: 없음\n"
+            f"• <b>기준봉 없는 종목({len(no_ref_tickers)})</b>: {no_ref_symbols_str}\n"
+            "----------------------------------------\n"
             "• <b>안내</b>: 현재 포착되었거나 유효하게 감시 중인 기준봉 종목이 없습니다."
         )
         SendMessage(empty_msg)

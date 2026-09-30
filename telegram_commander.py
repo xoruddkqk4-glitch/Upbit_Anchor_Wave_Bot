@@ -246,7 +246,11 @@ def handle_status_command(chat_id):
 
     # 3. 미보유 코인 중 기준봉이 없는 코인의 경우: 코인명 정보만
     avail_info = get_available_tickers(STATE_FILE)
-    unregistered_tickers = [ticker for _, ticker in avail_info["tickers_list"]]
+    ticker_ref_dates = avail_info.get("ticker_ref_dates", {})
+    unregistered_tickers = [
+        ticker for _, ticker in avail_info["tickers_list"]
+        if not ticker_ref_dates.get(ticker)
+    ]
     coin_names = [t.replace("KRW-", "") for t in unregistered_tickers]
 
     lines.append(f"<b>[3. 미보유 코인 (기준봉 X) ({len(coin_names)}개)]</b>")
@@ -281,46 +285,56 @@ def handle_setref_command(chat_id, args=""):
             else:
                 ticker = target_arg if target_arg.startswith("KRW-") else f"KRW-{target_arg}"
 
+            state_before = load_state(STATE_FILE)
+            prev_ref = state_before.get(ticker, {}).get("active_ref_date")
             send_message(chat_id, f"⏳ <b>[{ticker}]</b> {date_arg} 일봉 데이터 검증 중...")
             ok, result = validate_and_register_manual_ref(ticker, date_arg, STATE_FILE)
             if ok:
-                send_registration_success(chat_id, result)
+                send_registration_success(chat_id, result, prev_ref=prev_ref)
             else:
                 send_message(chat_id, f"{result}")
             return
 
-    # 2. 대화형 인터페이스: 미등록 코인 목록 및 인라인 버튼 안내
+    # 2. 대화형 인터페이스: 미보유 코인 목록 및 인라인 버튼 안내 (신규 등록 및 최신 갱신 통합)
     avail_info = get_available_tickers(STATE_FILE)
     tickers_list = avail_info["tickers_list"]
+    ticker_ref_dates = avail_info.get("ticker_ref_dates", {})
 
     if not tickers_list:
         send_message(
             chat_id,
-            "ℹ️ 현재 기준봉을 수동 등록할 수 있는 미등록 코인이 없습니다.\n(모든 코인이 이미 기준봉이 있거나 보유 중입니다.)",
+            "ℹ️ 현재 기준봉을 수동 등록/갱신할 수 있는 코인이 없습니다.\n(모든 감시 코인이 매수 포지션 보유 중입니다.)",
         )
         return
 
-    # 인라인 키보드 생성 (한 줄에 3~4개씩 버튼 배치)
+    # 인라인 키보드 생성 (한 줄에 3개씩 버튼 배치)
     inline_keyboard = []
     row = []
     text_list_lines = []
 
     for num, ticker in tickers_list:
         symbol = ticker.replace("KRW-", "")
+        curr_ref = ticker_ref_dates.get(ticker)
+        if curr_ref:
+            status_desc = f" <code>({curr_ref} 갱신)</code>"
+        else:
+            status_desc = " <i>(신규)</i>"
+
         row.append({"text": f"{num}. {symbol}", "callback_data": f"sel_{ticker}"})
-        text_list_lines.append(f"<b>{num}.</b> {ticker}")
+        text_list_lines.append(f"<b>{num}.</b> {ticker}{status_desc}")
         if len(row) == 3:
             inline_keyboard.append(row)
             row = []
     if row:
         inline_keyboard.append(row)
 
-    # 3열 텍스트 목록 포맷팅
+    # 텍스트 목록 포맷팅
     text_content = (
-        "<b>📌 [BST 봇] 수동 기준봉 등록 대상 코인</b>\n\n"
+        "<b>📌 [BST 봇] 수동 기준봉 등록 및 최신 갱신</b>\n\n"
         "아래 버튼을 터치하거나 번호(예: <code>1</code>)를 텍스트로 입력하세요:\n\n"
         + "\n".join(text_list_lines)
-        + "\n\n<i>취소하려면 /cancel 을 입력하세요.</i>"
+        + "\n\n<i>※ 매수 보유 중인 포지션은 손절선 보호를 위해 노출되지 않습니다.</i>"
+        + "\n<i>취소하려면 /cancel 을 입력하세요.</i>"
     )
 
     reply_markup = {"inline_keyboard": inline_keyboard}
@@ -343,8 +357,18 @@ def handle_ticker_selected(chat_id, ticker):
         "expire_at": time.time() + SESSION_TIMEOUT_SEC,
     }
 
+    state = load_state(STATE_FILE)
+    st = state.get(ticker, {})
+    curr_ref = st.get("active_ref_date")
+    ref_desc = (
+        f"• <b>현재 기준일</b>: <code>{curr_ref}</code> (새 날짜 입력 시 최신봉으로 갱신)\n"
+        if curr_ref
+        else "• <b>현재 상태</b>: 기준봉 미등록 (신규 등록)\n"
+    )
+
     msg = (
-        f"선택된 코인: <b>{ticker}</b>\n\n"
+        f"선택된 코인: <b>{ticker}</b>\n"
+        f"{ref_desc}\n"
         f"지정할 기준봉의 날짜를 입력해주세요.\n"
         f"• <b>입력 형식</b>: <code>YYYY-MM-DD</code> (예: <code>2026-03-15</code>)\n"
         f"• <b>유효 조건</b>: 최근 20일 이내 마감 확정 일봉\n\n"
@@ -362,18 +386,21 @@ def handle_date_input(chat_id, date_str):
     ticker = session["ticker"]
     date_str = date_str.strip()
 
+    state_before = load_state(STATE_FILE)
+    prev_ref = state_before.get(ticker, {}).get("active_ref_date")
+
     send_message(chat_id, f"⏳ <b>[{ticker}]</b> {date_str} 일봉 데이터 조회 및 손절선 검증 중...")
 
     ok, result = validate_and_register_manual_ref(ticker, date_str, STATE_FILE)
     if ok:
         user_sessions.pop(chat_id, None)
-        send_registration_success(chat_id, result)
+        send_registration_success(chat_id, result, prev_ref=prev_ref)
     else:
         msg = f"{result}\n\n👉 <i>다른 날짜를 다시 입력하시거나, 취소하려면 /cancel 을 입력하세요.</i>"
         send_message(chat_id, msg)
 
 
-def send_registration_success(chat_id, res):
+def send_registration_success(chat_id, res, prev_ref=None):
     """등록 성공 축하 및 상세 안내 메시지"""
     ticker = res["ticker"]
     ref_date = res["ref_date"]
@@ -386,15 +413,19 @@ def send_registration_success(chat_id, res):
     rise_dur = res["rise_duration"]
     curr_c = res["curr_close"]
 
+    if prev_ref and prev_ref != ref_date:
+        title = f"🔄 <b>[{ticker}] 기준봉 최신 갱신 완료!</b>\n• <b>이전 기준일</b>: {prev_ref} ➔ <b>새 기준일: {ref_date}</b>"
+    else:
+        title = f"🎉 <b>[{ticker}] 수동 기준봉 등록 완료!</b>\n• <b>기준일</b>: {ref_date}"
+
     msg = (
-        f"🎉 <b>[{ticker}] 수동 기준봉 등록 완료!</b>\n\n"
-        f"• <b>기준일</b>: {ref_date} ({ref_age}일 경과 / 잔여 유효 <b>{rem_days}일</b>)\n"
+        f"{title} ({ref_age}일 경과 / 잔여 유효 <b>{rem_days}일</b>)\n\n"
         f"• <b>실시간 현재가</b>: {format_price(curr_c)}\n"
         f"• <b>돌파 매수 기준가(고가)</b>: <b>{format_price(ref_high)}</b>\n"
         f"• <b>눌림 매수 기준가(중심가)</b>: <b>{format_price(ref_mid)}</b> (50% 지지)\n"
         f"• <b>손절 기준선(저가)</b>: <b>{format_price(ref_low)}</b>\n"
         f"• <b>1차 파동 높이</b>: {format_price(wave_h)} ({rise_dur}일간 상승)\n\n"
-        f"💡 <i>5분 주기 트레이딩 봇이 다음 실행부터 실시간 돌파/눌림목 매수 감시를 시작합니다.</i>"
+        f"💡 <i>5분 주기 트레이딩 봇이 다음 실행부터 새 기준봉 사다리로 실시간 매수 감시를 시작합니다.</i>"
     )
     send_message(chat_id, msg)
 
