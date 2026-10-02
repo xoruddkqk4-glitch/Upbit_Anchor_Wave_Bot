@@ -824,4 +824,27 @@
   - 실계좌 `bot_state.json` 기반 15개 미보유 코인(재매수 대기 코인 4종 포함) 및 5개 보유 코인 제외 시뮬레이션 검증 완료
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
 
+## 📝 [2026-10-02 12:23] 업데이트 이력 (Commit ID: d7790ad)
+- **수정 내용** (Zone 1 고가 돌파 재매수 1회 일괄 매수 및 단일 완성형 알림 통합, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_reentry_zone1_consolidation.py`, `README.md`):
+  1. **Zone 1(고가 돌파 재매수) 1회 일괄 풀포지션 매수 및 2차 잔액 분할 매수 중복 차단 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기존에 5일선 이탈 매도 시 손실 등으로 회수 금액(`base_amount`)이 원래 목표 배정액(`target_buy_amount`)보다 적을 때, Zone 1(고가 돌파) 재매수 직후 같은 5분 주기에서 0.1초 차이로 `[4. 추가 매수]` 블록의 '고가 돌파 미투자 잔액 전액 매수(BREAKOUT ALL-IN)'가 연쇄 발동하여 2회 분할 매수 및 2건의 텔레그램 알림이 발생하던 현상 해결
+     - 기준봉 고가 돌파 상태(Zone 1) 재매수 시, 직전 매도 회수 금액에 구애받지 않고 목표 배정 총액(`allocated_total`, 50만 원) 전액으로 1회 일괄 매수하여 100% 풀포지션을 완성
+     - 1초 미만 사이에 2회 발생하던 Upbit API 이중 주문, 이중 수수료, 호가 슬리피지를 원천 방지
+  2. **단일 완성형 텔레그램 알림 및 구글 시트 거래 기록 통합 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 2건으로 분리 발송되던 알림을 1건의 완성형 알림(`🚀 [BST 봇] 고가 돌파 재매수 완료! (Zone 1 BREAKOUT ALL-IN)`)으로 통합하여 가독성 개선
+     - 구글 시트 거래 이벤트명도 `BUY (RE-ENTRY Zone 1 ALL-IN)` 단 1건으로 깔끔하게 누적 기록
+     - 고가 돌파 발생일(`breakout_date`)을 자동 갱신하여 연속 양봉 트레일링 스탑 추적이 정상 작동하도록 연동
+  3. **동일 5분 감시 주기 내 후속 매수 평가 차단 가드 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - `reentry_just_executed = True` 플래그를 도입하여, 재매수가 방금 완료된 5분 루프에서는 바로 뒤의 `[4. 진입 및 매수 체크]` 블록을 완전히 건너뛰도록 보호 가드 적용
+     - Zone 2(고가~중심가 반등 구간)는 기준봉 고가 아래이므로 기존 원칙대로 직전 매도 금액만 매수하는 정책 완벽 보존
+  4. **Zone 1/2 재매수 통합 전용 단위 테스트 스위트 추가 (`test_reentry_zone1_consolidation.py`)**:
+     - Zone 1 재매수 시 50만 원 1회 매수, 1건의 알림 발송, 포지션 100% 정상화 검증
+     - Zone 2 재매수 시 직전 매도 금액만 매수되고 고가 돌파 잔액 매수가 즉시 발동하지 않음 검증
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py test_reentry_zone1_consolidation.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_reentry_zone1_consolidation.py` 2개 신규 단위 테스트 전원 통과 (Ran 2 tests, OK)
+  - `python -m unittest test_manual_ref.py test_breakout_stop_reentry.py` 기존 단위 테스트 13종 전원 100% 통과 (13/13 PASS)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
+
 

@@ -2496,6 +2496,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
     can_open_new = open_positions < MAX_OPEN_POSITIONS
 
     # [3. 재매수 체크] 5일선 매도 후 재매수 대기 모드 (하이브리드 룰 적용: Zone 1 고가돌파 / Zone 2 2*N반등)
+    reentry_just_executed = False
     is_waiting_reentry = (
         state.get("base_price") is not None and state.get("remaining_ratio", 0) == 0
     )
@@ -2544,7 +2545,16 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           )
 
       if reentry_triggered:
-        re_entry_amount = state.get("base_amount") or ORDER_AMOUNT_KRW
+        allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
+        # Zone 1 (고가 돌파 구간): 이미 실시간 가격이 기준봉 고가를 돌파했으므로,
+        # 직전 매도 회수액에 구애받지 않고 목표 배정 총액(allocated_total) 전액으로 일괄 매수하여
+        # 불필요한 2차 잔액 매수 분할 및 이중 텔레그램 알림을 원천 차단하고 100% 풀포지션을 완성한다.
+        if reentry_zone.startswith("Zone 1"):
+          re_entry_amount = max(state.get("base_amount") or 0.0, allocated_total)
+        else:
+          # Zone 2 (고가~중심가 반등 구간): 기준봉 고가 아래이므로 직전 매도 금액만 매수
+          re_entry_amount = state.get("base_amount") or allocated_total
+
         fill = execute_buy(upbit_client, ticker, re_entry_amount, curr_close)
         # 체결 0이면 대기 상태를 유지해 다음 주기에 재매수 재시도
         if fill["ok"]:
@@ -2556,11 +2566,15 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["remaining_ratio"] = 1.0
           state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
           state["effective_ref_low"] = reentry_stop_loss
+          state["target_buy_amount"] = re_entry_amount  # 목표 배정액 정상화
 
           # 파동 기준점(wave_anchor_*)은 원래 파동의 대칭 목표 유지를 위해 보존 (미기록 시만 백필)
           if not state.get("wave_anchor_price"):
             state["wave_anchor_price"] = entry_price
             state["wave_anchor_date"] = curr_candle_date
+
+          if reentry_zone.startswith("Zone 1"):
+            state["breakout_date"] = curr_candle_date  # 고가 돌파 발생일 (트레일링 스탑 기준일)
 
           state["scale_in_count"] = target_scale_in_steps
           state["tiered_tp_executed_levels"] = []
@@ -2570,6 +2584,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["base_amount"] = None
           state["base_price_date"] = None
           state["trough_low"] = None
+          reentry_just_executed = True
 
           # 왕복 비용 로깅
           round_trip_pct = (
@@ -2584,11 +2599,24 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             ).days
             round_trip_note += f" ({triggered_base_date} 매도 후 {days_in_limbo}일 만)"
 
+          if reentry_zone.startswith("Zone 1"):
+            event_name = "BUY (RE-ENTRY Zone 1 ALL-IN)"
+            reentry_title = "고가 돌파 재매수 완료! (Zone 1 BREAKOUT ALL-IN)"
+            reentry_amount_note = (
+                f"{fill['amount']:,.0f}원 (목표 배정액 {re_entry_amount:,.0f}원 100% 전액 집행 완료)"
+            )
+          else:
+            event_name = f"BUY (RE-ENTRY {reentry_zone[:6]})"
+            reentry_title = f"재매수 시그널 발생! ({reentry_zone})"
+            reentry_amount_note = (
+                f"{fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)"
+            )
+
           signals.append({
               "Ticker": ticker,
-              "Event": f"BUY (RE-ENTRY - {reentry_zone})",
+              "Event": event_name,
               "Strategy": (
-                  f"{reentry_reason} -> 매도 금액과 동일하게 재매수 ({fill['amount']:,.0f}원) | {round_trip_note}"
+                  f"{reentry_reason} -> {reentry_amount_note} | {round_trip_note}"
               ),
               "Entry_Price": round(entry_price, 2),
           })
@@ -2600,11 +2628,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               else f"<b>{format_price(reentry_stop_loss)}</b> (고가/확정봉 지지)"
           )
           SendMessage(
-              f"<b>🚀 [BST 봇] 재매수 시그널 발생! ({reentry_zone})</b>\n"
+              f"<b>🚀 [BST 봇] {reentry_title}</b>\n"
               f"• <b>종목</b>: {ticker}\n"
               f"• <b>체결/진입가</b>: {format_price(entry_price)}\n"
               f"• <b>설정 손절가</b>: {stop_loss_note}\n"
-              f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)\n"
+              f"• <b>매수 금액</b>: {reentry_amount_note}\n"
               f"• <b>매수 사유</b>: {reentry_reason}\n"
               f"• <b>왕복 비용</b>: {round_trip_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
@@ -2613,7 +2641,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           save_trade_to_google_sheet(
               ticker=ticker,
               trade_type="매수",
-              event_name=f"BUY (RE-ENTRY {reentry_zone[:6]})",
+              event_name=event_name,
               price=entry_price,
               volume=total_volume,
               amount_krw=fill["amount"],
@@ -2640,10 +2668,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         and (state.get("scale_in_count", 0) < target_scale_in_steps)
     )
 
-    if allow_entry and not is_waiting_reentry and (
-        not is_holding
-        or can_scale_in
-        or can_breakout_add
+    if (
+        allow_entry
+        and not is_waiting_reentry
+        and not reentry_just_executed
+        and (not is_holding or can_scale_in or can_breakout_add)
     ):
       is_pullback = False
       if ENABLE_PULLBACK_ENTRY:
