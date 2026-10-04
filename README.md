@@ -14,8 +14,8 @@
    - 5분 크론탭(Crontab) 모니터링 시 전체 코인을 낭비하지 않고, **09:07 스캐너가 포착한 활성 기준봉 종목 및 매수 포지션 종목만 선별 감시**합니다.
 
 3. **개선된 매매 전략 알고리즘 (BST Strategy)**
-   - **진입**: 기준봉 중심가 이하 눌림목 반등 진입 또는 고가 돌파 진입 (최대 50만 원, 3분할 매수 지원 및 변동성 사이징)
-   - **재매수 (Re-Entry)**: 5일선 꺾임으로 매도 후, 하이브리드 재돌파/반등 시 직전 매도 회수 금액(`base_amount`, 최대 50만 원) 전액 재매수
+   - **진입**: 기준봉 중심가 이하 눌림목 반등 진입 또는 고가 돌파 진입 (최대 50만 원, 3분할 매수 지원 및 변동성 사이징, 돌파 매매 시 1/3 분할 매수 적용)
+   - **재매수 (Re-Entry)**: 5일선 꺾임으로 매도 후, 하이브리드 재돌파/반등 시 재매수 (Zone 1 고가 돌파 구간은 직전 매도 회수금 + 1/3 피라미딩 증액 매수, 최대 50만 원 한도)
    - **분할 익절**: 파동 시간/가격 대칭 달성 및 최소 +3% 수익률 충족 시 보유 수량 50% 분할 매도
    - **추세 매도**: 5일 이동평균선(MA5) 꺾임 시 잔여 수량 전량 매도
    - **손절가**: 돌파 진입 시 고가 -2% / 진입가 -5% 하이브리드로 손절선 상향. 상향 손절만 이탈하고 원천 저가(`anchor_low`) Intact이면 **기준봉 유지 + 손절선 원천 저가 복원 후 눌림목·돌파 재감시**. 원천 저가까지 이탈하거나 20일 만료 시에만 기준봉 상태 초기화. 고가 위 청산 시에는 재매수 대기 모드로 전환
@@ -845,6 +845,32 @@
   - `python -m unittest test_reentry_zone1_consolidation.py` 2개 신규 단위 테스트 전원 통과 (Ran 2 tests, OK)
   - `python -m unittest test_manual_ref.py test_breakout_stop_reentry.py` 기존 단위 테스트 13종 전원 100% 통과 (13/13 PASS)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
+## 📝 [2026-10-04 23:03] 업데이트 이력 (Commit ID: 536f67d)
+- **수정 내용** (돌파 매수 1/3 분할 진입 및 고가 위 재매수 피라미딩 증액 적용, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_breakout_scaled_reentry.py`, `test_reentry_zone1_consolidation.py`, `README.md`):
+  1. **신규 돌파 진입 시 1/3 분할 매수 적용 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기준봉 고가 돌파(`curr_close > ref_high`) 시 기존의 목표 배정 총액(최대 50만 원) 100% 일괄 풀매수 대신, 1/3 분할 금액(`tranche_amount = target_amount / target_scale_in_steps`, 최대 약 16.6만 원)만 1차 진입하도록 수정
+     - 검증되지 않은 돌파 초기에 풀매수되어 가짜 돌파(False Breakout) 발생 시 손절 금액이 커지는 문제를 차단하고 계좌 리스크를 66.7% 축소
+     - `scale_in_count = 1`로 기록하고 돌파 완충 손절선(`calc_breakout_stop`) 정상 상향 등록
+  2. **보유 중 고가 돌파 추가 매수 로직 개선 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 눌림목 또는 이전 돌파로 일부 포지션을 보유 중일 때 고가 돌파 발생 시, 미투자 잔액 전액을 매수하지 않고 최대 1/3 금액(`min(tranche_amount, remaining_breakout_amount)`)만 추가 매수 집행
+     - 5분 주기 연속 체결 휩소 방지 가드(`can_scale_in_today`)를 연동하여 하루 1회만 점진적 매수 집행
+     - 누적 투자금은 어떤 경우에도 종목당 최대 배정액(50만 원)을 초과하지 않도록 철저히 상한 클램핑
+  3. **고가 위 청산 후 Zone 1 피라미딩 재매수 구현 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 돌파 후 매도했다가 고가 위에서 청산된 경우, 직전 매도가 상향 돌파 및 5일선 우상향 만족 시 기존 매도 회수금액(`base_amount`)에 최대 금액의 1/3(`allocated_total / 3`)을 더한 금액으로 재매수:
+       `re_entry_amount = min(base_amount + tranche_amount, allocated_total)`
+     - 추세가 확인된 랠리 국면에서 점진적으로 투자 비중을 늘려가는 우상향 피라미딩(Pyramiding) 전략 완성
+     - 최대 투자금 50만 원 상한을 엄격히 준수하여 과매수 차단
+  4. **신규 단위 테스트 스위트 추가 및 기존 테스트 동기화 (`test_breakout_scaled_reentry.py`, `test_reentry_zone1_consolidation.py`)**:
+     - 신규 돌파 1/3 진입, 보유 중 1/3 추가 매수, 50만 원 상한 보장, 고가 위 재매수 시 1/3 합산 및 50만 원 캡 검증 등 5개 전용 시나리오 단위 테스트 작성 및 전원 통과
+     - Zone 1 재매수 알림 메시지 포맷(`Zone 1 PYRAMID`)에 맞게 기존 테스트 assertion 동기화
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py test_breakout_scaled_reentry.py test_reentry_zone1_consolidation.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_breakout_scaled_reentry.py` 5개 신규 단위 테스트 전원 통과 (5/5 PASS)
+  - `python -m unittest test_reentry_zone1_consolidation.py` 2개 단위 테스트 전원 통과 (2/2 PASS)
+  - `python -m unittest discover -p "test_*.py"` 전체 20개 단위 테스트 전원 100% 통과 (Ran 20 tests, OK)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
 
 
 

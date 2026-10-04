@@ -2546,14 +2546,16 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
       if reentry_triggered:
         allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW
-        # Zone 1 (고가 돌파 구간): 이미 실시간 가격이 기준봉 고가를 돌파했으므로,
-        # 직전 매도 회수액에 구애받지 않고 목표 배정 총액(allocated_total) 전액으로 일괄 매수하여
-        # 불필요한 2차 잔액 매수 분할 및 이중 텔레그램 알림을 원천 차단하고 100% 풀포지션을 완성한다.
+        # Zone 1 (고가 돌파 구간): 기존 매도 금액(base_amount)에 최대 금액의 1/3을 더한 금액으로 피라미딩 재매수
+        # (단, 최대 투자금 50만 원 한도 준수)
+        # Zone 2 (고가~중심가 반등 구간): 기준봉 고가 아래이므로 직전 매도 금액만 매수
+        tranche_amount = allocated_total / target_scale_in_steps
         if reentry_zone.startswith("Zone 1"):
-          re_entry_amount = max(state.get("base_amount") or 0.0, allocated_total)
+          base_amt = state.get("base_amount") or 0.0
+          re_entry_amount = min(base_amt + tranche_amount, allocated_total)
         else:
-          # Zone 2 (고가~중심가 반등 구간): 기준봉 고가 아래이므로 직전 매도 금액만 매수
-          re_entry_amount = state.get("base_amount") or allocated_total
+          base_amt = state.get("base_amount") or allocated_total
+          re_entry_amount = base_amt
 
         fill = execute_buy(upbit_client, ticker, re_entry_amount, curr_close)
         # 체결 0이면 대기 상태를 유지해 다음 주기에 재매수 재시도
@@ -2566,7 +2568,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["remaining_ratio"] = 1.0
           state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
           state["effective_ref_low"] = reentry_stop_loss
-          state["target_buy_amount"] = re_entry_amount  # 목표 배정액 정상화
+          state["target_buy_amount"] = allocated_total  # 목표 배정 총액 한도 유지
 
           # 파동 기준점(wave_anchor_*)은 원래 파동의 대칭 목표 유지를 위해 보존 (미기록 시만 백필)
           if not state.get("wave_anchor_price"):
@@ -2576,7 +2578,9 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           if reentry_zone.startswith("Zone 1"):
             state["breakout_date"] = curr_candle_date  # 고가 돌파 발생일 (트레일링 스탑 기준일)
 
-          state["scale_in_count"] = target_scale_in_steps
+          calc_scale_step = int(round(re_entry_amount / tranche_amount)) if tranche_amount > 0 else target_scale_in_steps
+          state["scale_in_count"] = min(max(calc_scale_step, 1), target_scale_in_steps)
+          state["last_scale_in_date"] = curr_candle_date
           state["tiered_tp_executed_levels"] = []
           triggered_base_price = state["base_price"]
           triggered_base_date = state.get("base_price_date")
@@ -2600,10 +2604,10 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             round_trip_note += f" ({triggered_base_date} 매도 후 {days_in_limbo}일 만)"
 
           if reentry_zone.startswith("Zone 1"):
-            event_name = "BUY (RE-ENTRY Zone 1 ALL-IN)"
-            reentry_title = "고가 돌파 재매수 완료! (Zone 1 BREAKOUT ALL-IN)"
+            event_name = "BUY (RE-ENTRY Zone 1 PYRAMID)"
+            reentry_title = "고가 돌파 피라미딩 재매수 완료! (Zone 1 PYRAMID)"
             reentry_amount_note = (
-                f"{fill['amount']:,.0f}원 (목표 배정액 {re_entry_amount:,.0f}원 100% 전액 집행 완료)"
+                f"{fill['amount']:,.0f}원 (기존 매도금 {base_amt:,.0f}원 + 1/3 증액 {tranche_amount:,.0f}원 ➔ 목표 배정액 {allocated_total:,.0f}원 중 {state['scale_in_count']}/{target_scale_in_steps}차 집행 완료)"
             )
           else:
             event_name = f"BUY (RE-ENTRY {reentry_zone[:6]})"
@@ -2710,13 +2714,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         )
       if not state["entry_bought"] and can_open_new:
         if is_breakout:
-          # 1) 돌파 매매: 현재가가 기준봉 고가 돌파 시 변동성 사이징 산출 후 전액 매수 (장중 실시간 5분 주기 감시)
+          # 1) 돌파 매매: 현재가가 기준봉 고가 돌파 시 변동성 사이징 산출 후 1/3 금액 1차 매수 (장중 실시간 5분 주기 감시)
           prev_low = state["effective_ref_low"]
           expected_stop, _ = calc_breakout_stop(
               ref_high, curr_close, prev_low
           )
           target_amount = calc_position_size(curr_close, expected_stop)
-          fill = execute_buy(upbit_client, ticker, target_amount, curr_close)
+          tranche_amount = target_amount / target_scale_in_steps
+          fill = execute_buy(upbit_client, ticker, tranche_amount, curr_close)
           if fill["ok"]:
             state["last_scale_in_date"] = curr_candle_date
             state["entry_bought"] = True
@@ -2724,7 +2729,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["total_volume"] = fill["volume"]
             state["remaining_ratio"] = 1.0
             state["target_buy_amount"] = target_amount
-            state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
+            state["scale_in_count"] = 1  # 1/3 분할 매수 완료 처리
             state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
             state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
             state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
@@ -2736,16 +2741,16 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
             signals.append({
                 "Ticker": ticker,
-                "Event": "BUY (BREAKOUT ALL-IN)",
+                "Event": f"BUY (BREAKOUT 1/{target_scale_in_steps})",
                 "Entry_Price": round(fill["price"], 2),
                 "Stop_Loss_Adjusted": new_stop,
             })
 
             SendMessage(
-                f"<b>🚀 [BST 봇] 돌파 매수 발생! (BREAKOUT ALL-IN)</b>\n"
+                f"<b>🚀 [BST 봇] 돌파 매수 발생! (1/{target_scale_in_steps}차 매수)</b>\n"
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결/진입가</b>: {format_price(fill['price'])}\n"
-                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (배정 총액 {target_amount:,.0f}원 중 100% 전액 매수)\n"
+                f"• <b>매수 금액</b>: {fill['amount']:,.0f}원 (배정 총액 {target_amount:,.0f}원 중 1/{target_scale_in_steps} 분할 매수)\n"
                 f"• <b>매수 사유</b>: 실시간 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 고가({format_price(ref_high)}) 상향 돌파 확인\n"
                 f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
@@ -2754,14 +2759,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             save_trade_to_google_sheet(
                 ticker=ticker,
                 trade_type="매수",
-                event_name="BUY (BREAKOUT ALL-IN)",
+                event_name=f"BUY (BREAKOUT 1/{target_scale_in_steps})",
                 price=fill["price"],
                 volume=fill["volume"],
                 amount_krw=fill["amount"],
                 entry_price=fill["price"],
                 reason=(
-                    f"실시간 현재가 기준봉 고가 상향 돌파 100% 전액 매수"
-                    f" (변동성 배정: {target_amount:,.0f}원)"
+                    f"실시간 현재가 기준봉 고가 상향 돌파 1/{target_scale_in_steps} 분할 매수"
+                    f" (변동성 배정: {target_amount:,.0f}원 중 {tranche_amount:,.0f}원)"
                 ),
             )
 
@@ -2818,13 +2823,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 ),
             )
 
-      # B. 포지션 보유 중 추가 매수 관리 (고가 돌파 잔액 매수 또는 눌림목 분할 매수)
+      # B. 포지션 보유 중 추가 매수 관리 (고가 돌파 1/3 추가 매수 또는 눌림목 분할 매수)
       elif is_holding:
-        if is_breakout and can_breakout_add:
-          # 1) 실시간 고가 돌파 시: 목표 배정액(target_buy_amount) 대비 미투자 잔액을 전액 매수하여 100% 포지션 완성 및 손절선 상향 (실시간 5분 감시)
-          # (scale_in_count와 무관하게 실제 투자금이 배정액보다 부족하면 차액 전액 매수 집행)
-          remaining_amount = remaining_breakout_amount
-          fill = execute_buy(upbit_client, ticker, remaining_amount, curr_close)
+        can_scale_in_today = state.get("last_scale_in_date") != curr_candle_date
+        if is_breakout and can_breakout_add and can_scale_in_today:
+          # 1) 실시간 고가 돌파 시: 목표 배정액(target_buy_amount) 대비 최대 1/3 금액만 추가 매수 (최대 50만 원 상한 준수, 실시간 5분 감시)
+          tranche_amount = allocated_total / target_scale_in_steps
+          add_amount = min(tranche_amount, remaining_breakout_amount)
+          fill = execute_buy(upbit_client, ticker, add_amount, curr_close)
           if fill["ok"]:
             state["last_scale_in_date"] = curr_candle_date
             add_volume = fill["volume"]
@@ -2836,28 +2842,44 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
                 + (fill["price"] * add_volume)
             ) / new_total_vol
             state["total_volume"] = new_total_vol
-            state["remaining_ratio"] = 1.0  # 잔액 매수로 포지션 100% 정상화
-            state["scale_in_count"] = target_scale_in_steps  # 전액 매수 완료 처리
+            state["remaining_ratio"] = 1.0  # 추가 매수로 포지션 정상화
+            new_scale_count = state.get("scale_in_count", 0) + 1
+            state["scale_in_count"] = min(new_scale_count, target_scale_in_steps)
             state["breakout_date"] = curr_candle_date  # 고가 돌파 발생일 (연속 양봉 트레일링 기준일)
             prev_low = state["effective_ref_low"]
-            # 손실 상한은 잔액 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
+            # 손실 상한은 추가 매수 반영 후의 평단가 기준으로 산출 (포지션 전체에 적용되는 손절선)
             new_stop, stop_basis = calc_breakout_stop(
                 ref_high, state["entry_price"], prev_low
             )
             state["effective_ref_low"] = new_stop
 
+            is_full = (
+                state["scale_in_count"] >= target_scale_in_steps
+                or (allocated_total - (state["entry_price"] * new_total_vol)) < MIN_BUY_AMOUNT_KRW
+            )
+            event_name = (
+                "BUY (BREAKOUT FULL SCALE-IN)"
+                if is_full
+                else f"BUY (BREAKOUT SCALE-IN {state['scale_in_count']}/{target_scale_in_steps})"
+            )
+            title_text = (
+                f"<b>🚀 [BST 봇] 고가 돌파 추가 매수 완료! ({state['scale_in_count']}/{target_scale_in_steps}차 풀포지션 달성)</b>\n"
+                if is_full
+                else f"<b>🚀 [BST 봇] 고가 돌파 추가 매수 발생! ({state['scale_in_count']}/{target_scale_in_steps}차 매수)</b>\n"
+            )
+
             signals.append({
                 "Ticker": ticker,
-                "Event": "BUY (BREAKOUT FULL SCALE-IN)",
+                "Event": event_name,
                 "Entry_Price": round(state["entry_price"], 2),
                 "Stop_Loss_Adjusted": new_stop,
             })
 
             SendMessage(
-                f"<b>🚀 [BST 봇] 고가 돌파 시그널! 남은 잔액 전액 매수 (BREAKOUT ALL-IN)</b>\n"
+                f"{title_text}"
                 f"• <b>종목</b>: {ticker}\n"
                 f"• <b>체결가</b>: {format_price(fill['price'])} (평단가: {format_price(state['entry_price'])})\n"
-                f"• <b>매수 잔액</b>: {fill['amount']:,.0f}원 (목표 배정액 {allocated_total:,.0f}원 중 잔액 집행 ➔ 100% 완료)\n"
+                f"• <b>추가 매수금</b>: {fill['amount']:,.0f}원 (목표 배정액 {allocated_total:,.0f}원 중 {state['scale_in_count']}/{target_scale_in_steps}차 집행)\n"
                 f"• <b>매수 사유</b>: 실시간 현재가({format_price(curr_close)})가 기준봉({state['active_ref_date']}) 고가({format_price(ref_high)}) 상향 돌파 확인\n"
                 f"• <b>손절선 재조정</b>: {format_price(prev_low)} ➔ <b>{format_price(new_stop)}</b> ({stop_basis})\n"
                 f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
@@ -2866,13 +2888,13 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             save_trade_to_google_sheet(
                 ticker=ticker,
                 trade_type="매수",
-                event_name="BUY (BREAKOUT FULL SCALE-IN)",
+                event_name=event_name,
                 price=fill["price"],
                 volume=add_volume,
                 amount_krw=fill["amount"],
                 entry_price=state["entry_price"],
                 reason=(
-                    f"고가 돌파 미투자 잔액 전액 매수 (배정: {allocated_total:,.0f}원, 잔액: {fill['amount']:,.0f}원)"
+                    f"고가 돌파 1/3 추가 매수 (배정: {allocated_total:,.0f}원, 추가 매수: {fill['amount']:,.0f}원, {state['scale_in_count']}/{target_scale_in_steps}차)"
                 ),
             )
 

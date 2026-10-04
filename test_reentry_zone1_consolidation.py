@@ -75,7 +75,7 @@ class TestReentryZone1Consolidation(unittest.TestCase):
 
         # 2. 텔레그램 메시지가 1건만 발송되었는지 확인
         self.assertEqual(len(sent_messages), 1, f"텔레그램 메시지가 1건이 아닌 {len(sent_messages)}건 발송됨")
-        self.assertIn("고가 돌파 재매수 완료! (Zone 1 BREAKOUT ALL-IN)", sent_messages[0])
+        self.assertIn("Zone 1 PYRAMID", sent_messages[0])
         self.assertIn("KRW-ETH", sent_messages[0])
         self.assertIn("500,000원", sent_messages[0])
 
