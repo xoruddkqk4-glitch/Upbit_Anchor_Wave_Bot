@@ -1,5 +1,5 @@
 # test_breakout_scaled_reentry.py
-# 돌파 매수 1/3 분할 진입, 보유 중 1/3 추가 매수, 고가 위 청산 후 피라미딩 재매수 단위 검증
+# 돌파 매수 1/3 분할 진입, 이벤트 기반 재돌파(breakout_armed) 추가 매수, 고가 위 청산 후 피라미딩 재매수 단위 검증
 
 import unittest
 from unittest.mock import MagicMock, patch
@@ -31,13 +31,14 @@ class TestBreakoutScaledReentry(unittest.TestCase):
         return {"KRW-BTC": st}
 
     def test_new_breakout_buys_one_third(self):
-        """신규 돌파 발생 시 목표 배정액(500,000원)의 1/3만 1차 진입하고 scale_in_count=1 확인"""
+        """신규 돌파 발생 시 목표 배정액(500,000원)의 1/3만 1차 진입하고 breakout_armed=False 잠금 확인"""
         global_state = self._make_state({
             "entry_bought": False,
             "scale_in_count": 0,
+            "breakout_armed": True,
         })
 
-        # 30일치 데이터 (마지막 날 2026-03-30, active_ref_date 2026-03-25로부터 5일 경과)
+        # 30일치 데이터 (현재가 1010원: ref_high 1000원 돌파)
         dates = pd.date_range("2026-03-01", periods=30, freq="D")
         df = pd.DataFrame(
             {
@@ -77,26 +78,75 @@ class TestBreakoutScaledReentry(unittest.TestCase):
         self.assertEqual(st["scale_in_count"], 1)
         self.assertEqual(st["target_buy_amount"], 500000.0)
         self.assertEqual(st["breakout_date"], dates[-1].strftime("%Y-%m-%d"))
+        # 동일 돌파 레그에서는 breakout_armed가 False로 잠김 확인
+        self.assertFalse(st["breakout_armed"])
 
-    def test_breakout_add_buys_one_third(self):
-        """1/3 보유 중 돌파 시 1/3 추가 매수하여 scale_in_count=2 확인"""
+    def test_staying_above_high_does_not_buy_again(self):
+        """1/3 돌파 매수 후 다음 날에도 계속 고가 위에 머물러 있으면 추가 매수가 절대 발생하지 않음 확인"""
         global_state = self._make_state({
             "entry_bought": True,
-            "entry_price": 950.0,
-            "total_volume": 166666.67 / 950.0,  # 1/3 진입된 상태
+            "entry_price": 1010.0,
+            "total_volume": 166666.67 / 1010.0,
             "remaining_ratio": 1.0,
             "scale_in_count": 1,
-            "last_scale_in_date": "2026-03-29",  # 어제 일봉
+            "last_scale_in_date": "2026-03-29",  # 어제 매수함
+            "breakout_armed": False,  # 돌파 매수 직후 잠금 상태
             "symmetry_tp_executed": False,
             "price_tp_executed": False,
         })
 
+        # 오늘(2026-03-30) 현재가 1020원 (고가 1000원 위에서 계속 머무름)
         dates = pd.date_range("2026-03-01", periods=30, freq="D")
         df = pd.DataFrame(
             {
-                "open": [980.0] * 29 + [1000.0],
-                "high": [990.0] * 29 + [1020.0],
-                "low": [970.0] * 29 + [995.0],
+                "open": [980.0] * 29 + [1015.0],
+                "high": [990.0] * 29 + [1025.0],
+                "low": [970.0] * 29 + [1010.0],
+                "close": [980.0] * 29 + [1020.0],
+                "volume": [1000.0] * 30,
+            },
+            index=dates,
+        )
+
+        mock_upbit = MagicMock()
+        buy_calls = []
+
+        def mock_buy(client, ticker, amount, price):
+            buy_calls.append({"amount": amount, "price": price})
+            return {"ok": True, "price": price, "volume": amount / price, "amount": amount}
+
+        with patch.object(bot, "execute_buy", side_effect=mock_buy):
+            with patch.object(bot, "SendMessage"):
+                with patch.object(bot, "save_trade_to_google_sheet"):
+                    bot.process_ticker_strategy("KRW-BTC", df, mock_upbit, global_state)
+
+        # 고가 아래로 내려갔다 오지 않았으므로 추가 매수 0회! (1/3 비중 유지)
+        self.assertEqual(len(buy_calls), 0)
+        st = global_state["KRW-BTC"]
+        self.assertEqual(st["scale_in_count"], 1)
+        self.assertFalse(st["breakout_armed"])
+
+    def test_dip_below_high_rearms_and_rebreakout_buys_second_tranche(self):
+        """고가 아래로 눌렸다가 다시 고가를 돌파(재돌파)할 때 비로소 1/3 추가 매수 집행 확인"""
+        global_state = self._make_state({
+            "entry_bought": True,
+            "entry_price": 990.0,
+            "total_volume": 166666.67 / 990.0,
+            "remaining_ratio": 1.0,
+            "scale_in_count": 1,
+            "last_scale_in_date": "2026-03-29",
+            "breakout_armed": True,  # 장중 또는 어제 고가 이하(980원 등)로 눌려 재무장된 상태
+            "symmetry_tp_executed": False,
+            "price_tp_executed": False,
+        })
+
+        # 오늘 현재가 1010원 (고가 1000원 재돌파 성공!)
+        dates = pd.date_range("2026-03-01", periods=30, freq="D")
+        df = pd.DataFrame(
+            {
+                "open": [980.0] * 29 + [995.0],
+                "high": [990.0] * 29 + [1015.0],
+                "low": [970.0] * 29 + [990.0],
                 "close": [980.0] * 29 + [1010.0],
                 "volume": [1000.0] * 30,
             },
@@ -108,28 +158,25 @@ class TestBreakoutScaledReentry(unittest.TestCase):
 
         def mock_buy(client, ticker, amount, price):
             buy_calls.append({"amount": amount, "price": price})
-            return {
-                "ok": True,
-                "price": price,
-                "volume": amount / price,
-                "amount": amount,
-            }
+            return {"ok": True, "price": price, "volume": amount / price, "amount": amount}
 
         with patch.object(bot, "execute_buy", side_effect=mock_buy):
             with patch.object(bot, "SendMessage"):
                 with patch.object(bot, "save_trade_to_google_sheet"):
                     bot.process_ticker_strategy("KRW-BTC", df, mock_upbit, global_state)
 
-        # 1/3 추가 매수 확인
+        # 재돌파 성립으로 1/3 추가 매수 집행!
         self.assertEqual(len(buy_calls), 1)
         expected_tranche = 500000.0 / 3.0
         self.assertAlmostEqual(buy_calls[0]["amount"], expected_tranche, delta=1.0)
 
         st = global_state["KRW-BTC"]
         self.assertEqual(st["scale_in_count"], 2)
+        # 매수 후 다시 잠김 확인
+        self.assertFalse(st["breakout_armed"])
 
     def test_breakout_add_caps_at_max_amount(self):
-        """35만 원 이미 투자된 상태에서 돌파 시 잔여 금액(15만 원)만 매수되어 50만 원 상한 준수"""
+        """35만 원 이미 투자된 상태에서 재돌파 시 잔여 금액(15만 원)만 매수되어 50만 원 상한 준수"""
         initial_invested = 350000.0
         global_state = self._make_state({
             "entry_bought": True,
@@ -138,6 +185,7 @@ class TestBreakoutScaledReentry(unittest.TestCase):
             "remaining_ratio": 1.0,
             "scale_in_count": 2,
             "last_scale_in_date": "2026-03-29",
+            "breakout_armed": True,
             "symmetry_tp_executed": False,
             "price_tp_executed": False,
         })
@@ -159,12 +207,7 @@ class TestBreakoutScaledReentry(unittest.TestCase):
 
         def mock_buy(client, ticker, amount, price):
             buy_calls.append({"amount": amount, "price": price})
-            return {
-                "ok": True,
-                "price": price,
-                "volume": amount / price,
-                "amount": amount,
-            }
+            return {"ok": True, "price": price, "volume": amount / price, "amount": amount}
 
         with patch.object(bot, "execute_buy", side_effect=mock_buy):
             with patch.object(bot, "SendMessage"):
@@ -179,7 +222,7 @@ class TestBreakoutScaledReentry(unittest.TestCase):
         self.assertEqual(st["scale_in_count"], 3)
 
     def test_zone1_reentry_adds_one_third_to_base_amount(self):
-        """고가 위 청산(base_amount=170,000원) 후 Zone 1 재매수 시 17만 + 1/3(16.6만) = 약 33.6만 원 매수 확인"""
+        """고가 위 청산(base_amount=170,000원) 후 Zone 1 재매수 시 17만 + 1/3(16.6만) = 약 33.6만 원 매수 및 잠금 확인"""
         global_state = self._make_state({
             "entry_bought": False,
             "base_price": 1050.0,  # 1050원에 고가 위 청산
@@ -207,12 +250,7 @@ class TestBreakoutScaledReentry(unittest.TestCase):
 
         def mock_buy(client, ticker, amount, price):
             buy_calls.append({"amount": amount, "price": price})
-            return {
-                "ok": True,
-                "price": price,
-                "volume": amount / price,
-                "amount": amount,
-            }
+            return {"ok": True, "price": price, "volume": amount / price, "amount": amount}
 
         with patch.object(bot, "execute_buy", side_effect=mock_buy):
             with patch.object(bot, "SendMessage"):
@@ -228,6 +266,7 @@ class TestBreakoutScaledReentry(unittest.TestCase):
         self.assertTrue(st["entry_bought"])
         self.assertEqual(st["scale_in_count"], 2)  # 약 2/3 수준
         self.assertEqual(st["target_buy_amount"], 500000.0)
+        self.assertFalse(st["breakout_armed"])
 
     def test_zone1_reentry_caps_at_max_amount(self):
         """고가 위 청산(base_amount=400,000원) 후 Zone 1 재매수 시 40만 + 16.6만 = 56.6만 원이지만 50만 원 상한에 걸림 확인"""
@@ -257,12 +296,7 @@ class TestBreakoutScaledReentry(unittest.TestCase):
 
         def mock_buy(client, ticker, amount, price):
             buy_calls.append({"amount": amount, "price": price})
-            return {
-                "ok": True,
-                "price": price,
-                "volume": amount / price,
-                "amount": amount,
-            }
+            return {"ok": True, "price": price, "volume": amount / price, "amount": amount}
 
         with patch.object(bot, "execute_buy", side_effect=mock_buy):
             with patch.object(bot, "SendMessage"):
@@ -275,6 +309,7 @@ class TestBreakoutScaledReentry(unittest.TestCase):
 
         st = global_state["KRW-BTC"]
         self.assertEqual(st["scale_in_count"], 3)
+        self.assertFalse(st["breakout_armed"])
 
 
 if __name__ == "__main__":

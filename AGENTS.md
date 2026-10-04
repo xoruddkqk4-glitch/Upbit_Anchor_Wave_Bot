@@ -34,7 +34,7 @@
   3. GitHub 원격 저장소로 `git push`를 수행하고 결과를 사용자에게 종합 보고합니다.
 - **`README.md` 변경 이력 누적 기록 규칙:**
   - `README.md` 맨 하단에 **날짜 및 시간(서울 기준 KST: YYYY-MM-DD HH:mm)** 기준으로 누적 기록합니다.
-  - 누적 기록에는 **날짜 및 시간(KST)**, **커밋 ID(Commit Hash)**, **수정 내용**이 반드시 포함되어야 합니다.
+  - 누적 기록에는 **날짜 및 시간(KST)**, **직전 커밋 해시(Base Commit Hash)**, **수정 내용**이 반드시 포함되어야 합니다. (양식: `## 📝 [YYYY-MM-DD HH:mm] 업데이트 이력 (직전 커밋: <직전 커밋 해시>)`)
 - 커밋 메시지는 한국어로 작성하며, `docs: update README.md and detailed commit results` 포맷을 따릅니다.
 - `main` 브랜치에 직접 커밋/푸시합니다.
 

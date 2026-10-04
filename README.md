@@ -846,7 +846,7 @@
   - `python -m unittest test_manual_ref.py test_breakout_stop_reentry.py` 기존 단위 테스트 13종 전원 100% 통과 (13/13 PASS)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
 
-## 📝 [2026-10-04 23:03] 업데이트 이력 (Commit ID: 536f67d)
+## 📝 [2026-10-04 23:03] 업데이트 이력 (직전 커밋: 8594260, 커밋 ID: 0dd8c96)
 - **수정 내용** (돌파 매수 1/3 분할 진입 및 고가 위 재매수 피라미딩 증액 적용, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_breakout_scaled_reentry.py`, `test_reentry_zone1_consolidation.py`, `README.md`):
   1. **신규 돌파 진입 시 1/3 분할 매수 적용 (`Upbit_Anchor_Wave_Bot.py`)**:
      - 기준봉 고가 돌파(`curr_close > ref_high`) 시 기존의 목표 배정 총액(최대 50만 원) 100% 일괄 풀매수 대신, 1/3 분할 금액(`tranche_amount = target_amount / target_scale_in_steps`, 최대 약 16.6만 원)만 1차 진입하도록 수정
@@ -870,6 +870,27 @@
   - `python -m unittest test_reentry_zone1_consolidation.py` 2개 단위 테스트 전원 통과 (2/2 PASS)
   - `python -m unittest discover -p "test_*.py"` 전체 20개 단위 테스트 전원 100% 통과 (Ran 20 tests, OK)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
+## 📝 [2026-10-04 23:38] 업데이트 이력 (직전 커밋: 0dd8c96)
+- **수정 내용** (돌파 이벤트(breakout_armed) 기반 1/3 매수 상태 머신 구축 및 커밋 이력 규칙 표준화, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_breakout_scaled_reentry.py`, `AGENTS.md`, `GEMINI.md`, `.agents/skills/git-commit/SKILL.md`, `README.md`):
+  1. **README 커밋 이력 기록 방식을 '직전 커밋 해시(Base Commit Hash)' 기준으로 영구 표준화**:
+     - 커밋 해시 사전 작성 시 발생하는 순환 참조(불일치) 문제를 영구 방지하기 위해 규칙 문서(`AGENTS.md`, `GEMINI.md`, `.agents/skills/git-commit/SKILL.md`) 개정
+     - 앞으로 모든 누적 이력은 커밋 직전 `git rev-parse --short HEAD` 기준의 직전 커밋 해시를 기록하여 1회 커밋만으로 README 내용과 Git 트리가 100% 일치하도록 보장
+  2. **돌파 이벤트 기반 상태 머신(`breakout_armed`) 구현 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 주가가 고가 위에 머물기만 해도 날짜 변경 시 매일 1/3씩 추가 매수되던 가격 위치(Level) 기반 맹점을 해결
+     - **최초 돌파 매수**: 1/3 진입 즉시 `breakout_armed = False`로 잠금 ➔ 고가 위에서 며칠간 머물러도 추가 매수 절대 없이 1/3 비중 유지
+     - **고가 이하 눌림 시 재무장**: 주가가 기준봉 고가 이하(`curr_close <= ref_high`)로 내려왔을 때 손절선 내에서 포지션을 유지하며 `state["breakout_armed"] = True`로 재무장
+     - **재돌파(새 이벤트) 시에만 추가 매수**: 고가 아래에서 지지를 받고 다시 고가를 상향 돌파(`curr_close > ref_high` & armed)할 때 비로소 1/3 추가 매수 집행 및 재잠금
+     - **고가 위 청산 후 재매수 연동**: Zone 1 피라미딩 재매수 체결 후에도 `breakout_armed = False`로 유지하여 고가 아래로 내려갔다 오기 전까지 추가 돌파 매수 차단
+  3. **이벤트 기반 6종 단위 테스트 스위트 보강 및 전원 통과 (`test_breakout_scaled_reentry.py`)**:
+     - 고가 위 횡보 시 날짜가 바뀌어도 추가 매수 0회(1/3 비중 유지) 검증
+     - 고가 아래 눌림 후 재돌파 시 비로소 1/3 추가 매수(2/3 완성) 및 재잠금 검증
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py test_breakout_scaled_reentry.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_breakout_scaled_reentry.py` 6개 신규 단위 테스트 전원 통과 (6/6 PASS)
+  - `python -m unittest discover -p "test_*.py"` 전체 21개 단위 테스트 전원 100% 통과 (Ran 21 tests in 0.101s, OK)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
 
 
 

@@ -1685,6 +1685,7 @@ def new_ticker_state():
       "atr": 0.0,
       "atr_date": None,
       "trough_low": None,
+      "breakout_armed": True,
   }
 
 
@@ -1803,6 +1804,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["remaining_ratio"] = 1.0
           state["tiered_tp_executed_levels"] = []
           state["trough_low"] = None
+          state["breakout_armed"] = True
 
           if was_waiting:
             print(
@@ -2161,6 +2163,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
           state["last_trailing_stop_date"] = None
           state["trough_low"] = None
           state["effective_ref_low"] = anchor_low
+          state["breakout_armed"] = True
           print(
               f"[{ticker}] [돌파 손절 -> 기준봉 유지/눌림목 재개] 매도가({format_price(sell_price)})"
               f" <= 고가({format_price(ref_high)}) 이나 원천 저가({format_price(anchor_low)}) Intact"
@@ -2577,6 +2580,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
 
           if reentry_zone.startswith("Zone 1"):
             state["breakout_date"] = curr_candle_date  # 고가 돌파 발생일 (트레일링 스탑 기준일)
+            state["breakout_armed"] = False  # 고가 위 재진입이므로 고가 아래 눌림 전까지 돌파 추가 매수 잠금
 
           calc_scale_step = int(round(re_entry_amount / tranche_amount)) if tranche_amount > 0 else target_scale_in_steps
           state["scale_in_count"] = min(max(calc_scale_step, 1), target_scale_in_steps)
@@ -2672,6 +2676,11 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
         and (state.get("scale_in_count", 0) < target_scale_in_steps)
     )
 
+    # 기준봉 고가 이하로 내려갔을 때 재돌파(Re-breakout) 신호 감지 대기 (재무장)
+    # (고가 위에서 횡보/상승하는 동안에는 breakout_armed=False가 유지되어 추가 매수가 발생하지 않음)
+    if is_holding and curr_close <= ref_high and not state.get("breakout_armed", False):
+      state["breakout_armed"] = True
+
     if (
         allow_entry
         and not is_waiting_reentry
@@ -2713,7 +2722,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             " 도달 -> 신규 진입 생략"
         )
       if not state["entry_bought"] and can_open_new:
-        if is_breakout:
+        if is_breakout and state.get("breakout_armed", True):
           # 1) 돌파 매매: 현재가가 기준봉 고가 돌파 시 변동성 사이징 산출 후 1/3 금액 1차 매수 (장중 실시간 5분 주기 감시)
           prev_low = state["effective_ref_low"]
           expected_stop, _ = calc_breakout_stop(
@@ -2730,6 +2739,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["remaining_ratio"] = 1.0
             state["target_buy_amount"] = target_amount
             state["scale_in_count"] = 1  # 1/3 분할 매수 완료 처리
+            state["breakout_armed"] = False  # 동일 돌파 레그에서는 추가 매수 잠금
             state["entry_date"] = curr_candle_date  # 포지션 진입일 (손익/기록용)
             state["wave_anchor_price"] = fill["price"]  # 파동 기준점 (가격 대칭 목표 = 기준점 + wave_height)
             state["wave_anchor_date"] = curr_candle_date  # 파동 기준일 (기간 대칭 시작). 재매수 시 유지
@@ -2826,13 +2836,15 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       # B. 포지션 보유 중 추가 매수 관리 (고가 돌파 1/3 추가 매수 또는 눌림목 분할 매수)
       elif is_holding:
         can_scale_in_today = state.get("last_scale_in_date") != curr_candle_date
-        if is_breakout and can_breakout_add and can_scale_in_today:
-          # 1) 실시간 고가 돌파 시: 목표 배정액(target_buy_amount) 대비 최대 1/3 금액만 추가 매수 (최대 50만 원 상한 준수, 실시간 5분 감시)
+        is_breakout_armed = state.get("breakout_armed", False)
+        if is_breakout and can_breakout_add and is_breakout_armed and can_scale_in_today:
+          # 1) 실시간 고가 재돌파 시: 고가 아래로 눌렸다가 다시 돌파하는 '새로운 돌파 이벤트' 성립 시에만 1/3 추가 매수 (최대 50만 원 상한 준수)
           tranche_amount = allocated_total / target_scale_in_steps
           add_amount = min(tranche_amount, remaining_breakout_amount)
           fill = execute_buy(upbit_client, ticker, add_amount, curr_close)
           if fill["ok"]:
             state["last_scale_in_date"] = curr_candle_date
+            state["breakout_armed"] = False  # 다시 고가 아래로 눌리기 전까지 추가 돌파 매수 잠금
             add_volume = fill["volume"]
             curr_holding_vol = state["total_volume"] * state["remaining_ratio"]
             new_total_vol = curr_holding_vol + add_volume

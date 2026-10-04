@@ -20,10 +20,10 @@ description: Triggered strictly by '/git-commit', '/action git-commit', or expli
    - 변경 사항 및 새로 추가되거나 검증된 기능 내역을 대상 프로젝트 루트의 **`README.md`**에 체계적으로 반영합니다.
    - **`README.md` 맨 뒷부분 누적 기록 규칙**:
      - `README.md` 수정 시, 업데이트되는 내용을 파일의 맨 뒷부분(하단)에 **날짜 및 시간(서울 기준 시각: YYYY-MM-DD HH:mm)** 기준으로 누적으로 기록합니다.
-     - 누적 기록에는 **날짜 및 시간(Date & Time, 서울 기준 KST)**, **커밋 ID(Commit Hash)**, **수정 내용(Modification Details)**이 반드시 포함되어야 합니다.
+     - 누적 기록에는 **날짜 및 시간(Date & Time, 서울 기준 KST)**, **직전 커밋 해시(Base Commit Hash)**, **수정 내용(Modification Details)**이 반드시 포함되어야 합니다.
      - 양식 예시:
        ```markdown
-       ## [YYYY-MM-DD HH:mm] 업데이트 이력 (Commit ID: <커밋 ID / Commit Hash>)
+       ## 📝 [YYYY-MM-DD HH:mm] 업데이트 이력 (직전 커밋: <직전 커밋 해시>)
        - **수정 내용**: <수정 사항 및 작업 내용 요약>
        - **검증 결과**: <검증 결과>
        ```
