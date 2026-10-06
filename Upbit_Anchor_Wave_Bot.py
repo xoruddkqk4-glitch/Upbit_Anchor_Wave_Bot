@@ -198,6 +198,10 @@ ENABLE_VOLATILITY_SIZING = True  # 손절폭 기반 변동성 가중 사이징(R
 MAX_LOSS_PER_TRADE_KRW = 50000  # 1회 손절 시 허용 최대 손실금 (원 단위: 5만 원, 총 자산 500만원 대비 1.0% 리스크 제어)
 ENABLE_MA5_EXIT_BUFFER = True  # 5일선 꺾임 매도 시 장중 휩소 방지 버퍼 활성화 여부
 MA5_EXIT_BUFFER_PCT = 0.005  # 5일선 하향 이탈 허용 버퍼 (0.005 = 0.5% 이상 실질 하향 이탈 시에만 매도)
+ENABLE_DUAL_TIMEFRAME_MA5 = True  # 일봉 5MA + 4시간봉 5MA 듀얼 타임프레임 대칭 매매 활성화 여부
+TIMEFRAME_4H_UNIT = 240  # 4시간봉 단위(분: 240분봉)
+MA5_4H_PERIOD = 5  # 4시간봉 이동평균 기간 (5이평)
+MA5_4H_EXIT_BUFFER_PCT = 0.005  # 4시간봉 5MA 하향 이탈 허용 버퍼 (0.005 = 0.5% 이상 실질 하향 이탈 시에만 매도)
 MAX_OPEN_POSITIONS = 20  # 동시 보유 종목 수 상한 (20개 전 종목 제한 없이 동시 매수 허용)
 API_DELAY_SEC = 0.1  # API 요청 간격 (초)
 
@@ -1072,6 +1076,37 @@ class UpbitClient:
     df.set_index("Date", inplace=True)
     return df[["open", "high", "low", "close", "volume"]]
 
+  def get_minute_ohlcv(self, ticker, unit=240, count=60):
+    """업비트 분봉 데이터 조회 (기본 unit=240: 4시간봉, MA5 컬럼 자동 산출)"""
+    url = f"{self.server_url}/candles/minutes/{unit}?market={ticker}&count={count}"
+    try:
+      res = requests.get(url, timeout=5).json()
+    except Exception as e:
+      print(f"[경고] {ticker} {unit}분봉 데이터 조회 실패: {e}")
+      return None
+    if not isinstance(res, list) or len(res) == 0:
+      return None
+
+    df = pd.DataFrame(res)
+    df = df.iloc[::-1].reset_index(drop=True)
+    df.rename(
+        columns={
+            "candle_date_time_kst": "Date",
+            "opening_price": "open",
+            "high_price": "high",
+            "low_price": "low",
+            "trade_price": "close",
+            "candle_acc_trade_volume": "volume",
+        },
+        inplace=True,
+    )
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df.set_index("Date", inplace=True)
+    df = df[["open", "high", "low", "close", "volume"]]
+    df["MA5"] = df["close"].rolling(window=5).mean()
+    return df
+
   def get_balances(self):
     """전체 계좌 잔고 조회"""
     url = f"{self.server_url}/accounts"
@@ -1698,12 +1733,32 @@ def count_open_positions(global_state):
   )
 
 
-def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=True):
+def process_ticker_strategy(
+    ticker, df, upbit_client, global_state, allow_entry=True, df_4h=None
+):
   """개선된 BST 전략을 반영한 단일 종목 실시간 모니터링 및 매매 집행
 
   allow_entry=False면 신규 진입·분할 추가·재매수 등 모든 매수 분기를 건너뛰고
   손절·대칭 익절·5일선 매도 등 매도 감시만 수행한다 (유의종목 등 제외 종목의 보유 포지션용).
   """
+  # 4시간봉 지연 평가 캐시 (동일 종목 1회 주기 내 중복 API 호출 방지)
+  cached_df_4h = df_4h
+
+  def _ensure_4h_df():
+    nonlocal cached_df_4h
+    if cached_df_4h is None and upbit_client and hasattr(upbit_client, "get_minute_ohlcv"):
+      try:
+        cached_df_4h = upbit_client.get_minute_ohlcv(
+            ticker, unit=TIMEFRAME_4H_UNIT, count=30
+        )
+      except Exception as e:
+        print(f"[{ticker}] 4시간봉 조회 예외 발생: {e}")
+        cached_df_4h = None
+    if isinstance(cached_df_4h, pd.DataFrame) and len(cached_df_4h) >= 5:
+      if "MA5" not in cached_df_4h.columns:
+        cached_df_4h["MA5"] = cached_df_4h["close"].rolling(window=MA5_4H_PERIOD).mean()
+    return cached_df_4h
+
   df = detect_reference_candles(df)
 
   if ticker not in global_state:
@@ -2414,15 +2469,37 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               reason=symmetry_reason,
           )
 
-      # B. 5일선 꺾임(하향 이탈) 체크 -> 잔여 전액 매도 후 기준 가격 기록
-      #    (가격 대칭 2단계가 같은 틱에 잔여 전량을 청산했으면 수량 0 주문을 내지 않도록 재확인)
-      #    ENABLE_MA5_EXIT_BUFFER=True인 경우 단순히 5일선 기울기만 꺾인 것으로는 팔지 않고,
-      #    현재가가 5일선 대비 최소 MA5_EXIT_BUFFER_PCT(0.5%) 이상 유의미하게 하향 이탈했을 때만 매도 (장중 미세 흔들림 휩소 방지)
-      is_ma5_down = curr_ma5 < prev_ma5
-      if ENABLE_MA5_EXIT_BUFFER:
-        is_ma5_down = is_ma5_down and (
-            curr_close < curr_ma5 * (1.0 - MA5_EXIT_BUFFER_PCT)
-        )
+      # B. 5일선 추세 청산 체크 (일봉 5MA 및 4시간봉 5MA 하향 이탈 듀얼 타임프레임 대칭 룰)
+      #    1단계 선행 조건: 일봉 5MA 하향 이탈 검사 (ENABLE_MA5_EXIT_BUFFER 시 MA5_EXIT_BUFFER_PCT 적용)
+      daily_exit_threshold = (
+          curr_ma5 * (1.0 - MA5_EXIT_BUFFER_PCT)
+          if ENABLE_MA5_EXIT_BUFFER
+          else curr_ma5
+      )
+      is_daily_down = curr_close < daily_exit_threshold
+
+      is_ma5_down = False
+      curr_ma5_4h = None
+
+      # 일봉 지지선 이탈이 발생한 경우에만 4시간봉 지연 평가(Short-circuit Lazy Evaluation)
+      if is_daily_down and state["remaining_ratio"] > 0:
+        if ENABLE_DUAL_TIMEFRAME_MA5:
+          df_4h = _ensure_4h_df()
+          if (
+              isinstance(df_4h, pd.DataFrame)
+              and len(df_4h) >= 5
+              and "MA5" in df_4h.columns
+              and not pd.isna(df_4h["MA5"].iloc[-1])
+          ):
+            curr_ma5_4h = float(df_4h["MA5"].iloc[-1])
+            h4_exit_threshold = curr_ma5_4h * (1.0 - MA5_4H_EXIT_BUFFER_PCT)
+            is_h4_down = curr_close < h4_exit_threshold
+            is_ma5_down = is_daily_down and is_h4_down
+          else:
+            # 4시간봉 데이터 부재/조회 실패 시 일봉 단독 이탈 조건으로 안전하게 폴백
+            is_ma5_down = is_daily_down
+        else:
+          is_ma5_down = is_daily_down
 
       if is_ma5_down and state["remaining_ratio"] > 0:
         target_vol = state["total_volume"] * state["remaining_ratio"]
@@ -2451,9 +2528,14 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
             state["trough_low"] = sell_price  # 하이브리드 재매수 바닥 저점 추적 시작값
             # 하이브리드 재매수 룰 적용: 고가~중심가 구간 2*N 반등 판정을 위해 ref_mid와 anchor_low 보존
 
+          h4_desc = (
+              f" & 4시간 5MA({format_price(curr_ma5_4h)}) 동시 하향 이탈"
+              if curr_ma5_4h is not None
+              else ""
+          )
           buffer_note = (
-              f" (5일선 {format_price(curr_ma5)} 대비"
-              f" {MA5_EXIT_BUFFER_PCT * 100:.1f}% 버퍼 이탈 확인)"
+              f" (일봉 5일선 {format_price(curr_ma5)} 대비"
+              f" {MA5_EXIT_BUFFER_PCT * 100:.1f}% 버퍼 이탈{h4_desc} 확인)"
               if ENABLE_MA5_EXIT_BUFFER
               else ""
           )
@@ -2461,7 +2543,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               "Ticker": ticker,
               "Event": "SELL (MA5 DOWN)",
               "Price": sell_price,
-              "Reason": f"5일선 꺾임{buffer_note} 전액 매도 -> 기준 가격 기록: {sell_price}",
+              "Reason": f"5일선 하향 이탈{buffer_note} 전액 매도 -> 기준 가격 기록: {sell_price}",
           })
 
           # 텔레그램 5일선 추세 매도 알림
@@ -2471,7 +2553,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               f"• <b>매도가</b>: {format_price(sell_price)}\n"
               f"• <b>수익률</b>: <b>{ret_pct * 100:+.2f}%</b>\n"
               f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원</b> (수수료 차감)\n"
-              f"• <b>매도 사유</b>: 5일선 하향 꺾임(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}){buffer_note} 확인 ➔ 잔여 전액 추세 매도 (재매수 기준가 {format_price(sell_price)} 기록)"
+              f"• <b>매도 사유</b>: 일봉 5일선({format_price(curr_ma5)}){h4_desc} 하향 이탈 확인 ➔ 잔여 전액 추세 매도 (재매수 기준가 {format_price(sell_price)} 기록)"
               f"{fill_note}\n"
               f"• <b>주문 모드</b>: {'실제 주문' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
@@ -2487,7 +2569,7 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
               realized_pnl_krw=realized_pnl,
               return_pct=ret_pct,
               reason=(
-                  f"5일선 하향 꺾임{buffer_note} 잔여 전액 매도"
+                  f"일봉 5일선{h4_desc} 하향 이탈 전액 매도"
                   f" (기준가 {format_price(sell_price)} 기록)"
               ),
           )
@@ -2521,31 +2603,66 @@ def process_ticker_strategy(ticker, df, upbit_client, global_state, allow_entry=
       reentry_stop_loss = 0.0
       reentry_reason = ""
 
+      # Zone 1 / Zone 2 선행 가격 조건 확인 (단락 평가: 충족 시에만 4시간봉 조회)
+      zone1_candidate = (curr_close >= ref_high) and (
+          state.get("base_price") is not None and curr_close > state["base_price"]
+      )
+      zone2_candidate = (ref_mid <= curr_close < ref_high) and (
+          curr_close >= bounce_threshold
+      )
+
+      curr_ma5_4h = None
+      if zone1_candidate or zone2_candidate:
+        if ENABLE_DUAL_TIMEFRAME_MA5:
+          df_4h = _ensure_4h_df()
+          if (
+              isinstance(df_4h, pd.DataFrame)
+              and len(df_4h) >= 5
+              and "MA5" in df_4h.columns
+              and not pd.isna(df_4h["MA5"].iloc[-1])
+          ):
+            curr_ma5_4h = float(df_4h["MA5"].iloc[-1])
+
+      def _check_reentry_ma_recovery():
+        if ENABLE_DUAL_TIMEFRAME_MA5 and curr_ma5_4h is not None:
+          # 완벽한 대칭: 4시간봉 5MA 상향 회복(돌파) 확인
+          return curr_close > curr_ma5_4h
+        # 듀얼 타임프레임 미사용 또는 4시간봉 데이터 부재 시 기존 일봉 우상향 폴백
+        return curr_ma5 > prev_ma5
+
       # Zone 1: 기준봉 고가 이상 (고가 돌파 구간)
-      if curr_close >= ref_high:
-        if curr_close > state["base_price"] and curr_ma5 > prev_ma5:
-          reentry_triggered = True
-          reentry_zone = "Zone 1 (고가 돌파)"
-          reentry_stop_loss = max(
-              state.get("effective_ref_low", 0.0),
-              ref_high,
-              confirmed_low,
-          )
-          reentry_reason = (
-              f"고가 돌파 구간(Zone 1) - 직전 매도가({format_price(state['base_price'])}) 상향 돌파"
-              f" & 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}) 확인"
-          )
+      if zone1_candidate and _check_reentry_ma_recovery():
+        reentry_triggered = True
+        reentry_zone = "Zone 1 (고가 돌파)"
+        reentry_stop_loss = max(
+            state.get("effective_ref_low", 0.0),
+            ref_high,
+            confirmed_low,
+        )
+        h4_desc = (
+            f" & 4시간 5MA({format_price(curr_ma5_4h)}) 상향 회복"
+            if curr_ma5_4h is not None
+            else f" & 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)})"
+        )
+        reentry_reason = (
+            f"고가 돌파 구간(Zone 1) - 직전 매도가({format_price(state['base_price'])}) 상향 돌파"
+            f"{h4_desc} 확인"
+        )
       # Zone 2: 기준봉 고가와 중심가 사이 (하이브리드 2*N 반등 구간)
-      elif ref_mid <= curr_close < ref_high:
-        if curr_close >= bounce_threshold and curr_ma5 > prev_ma5:
-          reentry_triggered = True
-          reentry_zone = "Zone 2 (하이브리드 2*N 반등)"
-          reentry_stop_loss = trough_low  # 직전 바닥 저점을 손절가로 설정
-          reentry_reason = (
-              f"하이브리드 구간(Zone 2) - 바닥 저점({format_price(trough_low)}) 대비"
-              f" 2*ATR({format_price(REENTRY_ATR_MULTIPLIER * curr_atr)}) 반등 기준({format_price(bounce_threshold)}) 돌파"
-              f" & 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)}) 확인"
-          )
+      elif zone2_candidate and _check_reentry_ma_recovery():
+        reentry_triggered = True
+        reentry_zone = "Zone 2 (하이브리드 2*N 반등)"
+        reentry_stop_loss = trough_low  # 직전 바닥 저점을 손절가로 설정
+        h4_desc = (
+            f" & 4시간 5MA({format_price(curr_ma5_4h)}) 상향 회복"
+            if curr_ma5_4h is not None
+            else f" & 5일선 우상향 전환(직전 {format_price(prev_ma5)} ➔ 현재 {format_price(curr_ma5)})"
+        )
+        reentry_reason = (
+            f"하이브리드 구간(Zone 2) - 바닥 저점({format_price(trough_low)}) 대비"
+            f" 2*ATR({format_price(REENTRY_ATR_MULTIPLIER * curr_atr)}) 반등 기준({format_price(bounce_threshold)}) 돌파"
+            f"{h4_desc} 확인"
+        )
 
       if reentry_triggered:
         allocated_total = state.get("target_buy_amount") or ORDER_AMOUNT_KRW

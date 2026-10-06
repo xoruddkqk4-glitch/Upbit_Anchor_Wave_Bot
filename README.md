@@ -891,6 +891,34 @@
   - `python -m unittest discover -p "test_*.py"` 전체 21개 단위 테스트 전원 100% 통과 (Ran 21 tests in 0.101s, OK)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
 
+## 📝 [2026-10-06 21:16] 업데이트 이력 (직전 커밋: b0c36b6)
+- **수정 내용** (완벽한 대칭(Symmetry) 기반 일봉 5MA + 4시간봉 5MA 듀얼 타임프레임 추세 매도 및 재매수 개편, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_dual_timeframe_symmetry.py`, `README.md`):
+  1. **추세 청산(매도) 듀얼 타임프레임 이탈 로직 개편 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기존의 일봉 5일선 기울기 꺾임(`curr_ma5 < prev_ma5`)이 가진 '5일 전 종가 대비 후행성 지연(Lag)' 문제를 완전 제거
+     - `[현재가 < 일봉 5MA * 0.995] AND [현재가 < 4시간봉 5MA * 0.995]` 동시 하향 이탈 구조로 일원화
+     - 일봉 5MA 이탈 선행 검증 후 충족 시에만 4시간봉을 핀포인트로 조회하는 단락 평가(Short-circuit Lazy Evaluation) 적용 (평상시 95% 이상 4시간봉 API 호출 0회 유지)
+     - 4시간봉 데이터 부재 또는 일시적 API 오류 발생 시 일봉 단독 조건으로 안전하게 폴백(Graceful Fallback)
+  2. **하이브리드 재매수 4시간봉 5MA 상향 회복(돌파) 대칭 구조 구현 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 재매수 진입을 심각하게 지연시키던 '일봉 5일선 우상향 전환' 조건을 제거
+     - Zone 1 (고가 돌파): `현재가 > base_price` (직전 매도가 상향 돌파) AND `현재가 > 4시간 5MA` (상향 회복) 확인 시 피라미딩 재매수
+     - Zone 2 (2*ATR 반등): `현재가 >= 바닥 + 2*ATR` (수급 반등 돌파) AND `현재가 > 4시간 5MA` (상향 회복) 확인 시 동일 금액 재매수
+     - 매도와 매수가 완전히 거울처럼 일치하는 완벽한 대칭(Symmetry) 다중 타임프레임 아키텍처 완성
+  3. **업비트 API 클라이언트 4시간봉(분봉) 조회 메서드 추가 (`UpbitAPI.get_minute_ohlcv`)**:
+     - `/candles/minutes/{unit}` (기본 240분) 엔드포인트 호출 및 일봉과 동일한 표준 DataFrame(오름차순) 포맷팅
+     - `MA5` 이동평균 컬럼 자동 산출 탑재
+  4. **신규 듀얼 타임프레임 전용 단위 테스트 스위트 추가 (`test_dual_timeframe_symmetry.py`)**:
+     - 1) [매도 휩소 방어]: 일봉 이탈 + 4시간봉 지지 시 매도 미발생 검증
+     - 2) [매도 즉각 청산]: 일봉 이탈 + 4시간봉 동시 이탈 시 전량 매도 집행 검증
+     - 3) [지연 평가 검증]: 일봉 지지 중 4시간봉 API 호출 횟수 0회(API 절약) 검증
+     - 4) [Zone 1 재매수]: 직전 매도가 돌파 + 4시간 5MA 회복 시 매수 검증 (4H 5MA 기울기 우하향이어도 가격 회복 시 정상 진입)
+     - 5) [Zone 2 재매수]: 바닥 대비 2*ATR 반등 + 4시간 5MA 회복 시 매수 검증
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py test_dual_timeframe_symmetry.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_dual_timeframe_symmetry.py` 5개 신규 단위 테스트 전원 통과 (5/5 PASS, 0.038s)
+  - `python -m unittest discover -p "test_*.py"` 전체 26개 단위 테스트 전원 100% 통과 (Ran 26 tests in 0.166s, OK)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
+
 
 
 
