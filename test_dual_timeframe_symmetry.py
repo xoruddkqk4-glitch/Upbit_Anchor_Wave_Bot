@@ -244,6 +244,42 @@ class TestDualTimeframeSymmetry(unittest.TestCase):
         self.assertTrue(global_state["KRW-BTC"]["entry_bought"])
         self.assertEqual(global_state["KRW-BTC"]["remaining_ratio"], 1.0)
 
+    def test_sell_above_ref_high_message_reflects_4h_ma(self):
+        """고가 위 청산 시 텔레그램 메시지에 4시간 5MA 상향 회복 문구가 동적으로 반영되는지 검증"""
+        daily_closes = [1000.0] * 25 + [1020.0, 1030.0, 1040.0, 1050.0, 1040.0]
+        df_daily = self._make_daily_df(daily_closes)
+
+        st = bot.new_ticker_state()
+        st.update({
+            "active_ref_date": "2026-09-10",
+            "ref_high": 1000.0,
+            "effective_ref_low": 1050.0,  # 손절선이 고가 위
+            "anchor_low": 900.0,
+            "ref_mid": 950.0,
+            "entry_bought": True,
+            "entry_price": 950.0,
+            "total_volume": 10.0,
+            "remaining_ratio": 1.0,
+        })
+        global_state = {"KRW-BTC": st}
+        mock_client = MagicMock()
+
+        # 1) ENABLE_DUAL_TIMEFRAME_MA5 = True 일 때
+        bot.ENABLE_DUAL_TIMEFRAME_MA5 = True
+        with patch.object(
+            bot,
+            "execute_sell",
+            return_value={"ok": True, "volume": 10.0, "price": 1040.0, "amount": 10400.0},
+        ), patch.object(bot, "SendMessage") as mock_send, patch.object(
+            bot, "save_trade_to_google_sheet"
+        ):
+            bot.process_ticker_strategy("KRW-BTC", df_daily, mock_client, global_state)
+            mock_send.assert_called_once()
+            sent_msg = mock_send.call_args[0][0]
+            self.assertIn("4시간 5MA 상향 회복", sent_msg)
+            self.assertNotIn("5일선 우상향", sent_msg)
+
 
 if __name__ == "__main__":
     unittest.main()
+

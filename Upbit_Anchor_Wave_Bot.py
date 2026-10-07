@@ -2161,7 +2161,7 @@ def process_ticker_strategy(
           # [분기 A: 고가 위 청산]
           # 기준봉 고점 위에서 손절/청산된 경우:
           # 상태를 완전 초기화하지 않고 매도가를 기준가(base_price)로 두어 재매수 대기 모드로 진입.
-          # (다음 주기 고가 위에서의 무한 휩소 재매수 방지 + 직전 매도가 재돌파 & 5일선 우상향 시만 재진입)
+          # (다음 주기 고가 위에서의 무한 휩소 재매수 방지 + 직전 매도가 재돌파 & 4시간 5MA 회복 시만 재진입)
           state["base_price"] = sell_price
           state["base_amount"] = sell_amount
           state["base_price_date"] = curr_candle_date
@@ -2174,13 +2174,18 @@ def process_ticker_strategy(
               f"[{ticker}] [고가 위 청산 -> 재매수 대기] 매도가({format_price(sell_price)}) > 기준봉 고가({format_price(ref_high)})"
               f" 확인 -> 매도가({format_price(sell_price)}) 기준 재매수 대기 모드 진입"
           )
+          reentry_cond_desc = (
+              "4시간 5MA 상향 회복"
+              if ENABLE_DUAL_TIMEFRAME_MA5
+              else "5일선 우상향"
+          )
           SendMessage(
               f"<b>🔄 [BST 봇] 고가 위 청산 ➔ 재매수 대기 모드 진입</b>\n"
               f"• <b>종목</b>: {ticker}\n"
               f"• <b>매도가</b>: {format_price(sell_price)} (기준봉 고가 {format_price(ref_high)} 상회)\n"
               f"• <b>실현손익</b>: <b>{realized_pnl:+,.0f}원 ({ret_pct*100:+.2f}%)</b> (수수료 차감)\n"
               f"• <b>매도 사유</b>: {reason_desc}\n"
-              f"• <b>내용</b>: 고점 위 청산 휩소 방지 ➔ 직전 매도가({format_price(sell_price)}) 재돌파 및 5일선 우상향 시에만 재매수 감시\n"
+              f"• <b>내용</b>: 고점 위 청산 휩소 방지 ➔ 직전 매도가({format_price(sell_price)}) 재돌파 및 {reentry_cond_desc} 시에만 재매수 감시\n"
               f"• <b>주문 모드</b>: {'실제 주문 (시장가)' if AUTO_TRADE_EXECUTE else '모의/스캔 모드'}"
           )
           return signals
@@ -2734,7 +2739,7 @@ def process_ticker_strategy(
             event_name = f"BUY (RE-ENTRY {reentry_zone[:6]})"
             reentry_title = f"재매수 시그널 발생! ({reentry_zone})"
             reentry_amount_note = (
-                f"{fill['amount']:,.0f}원 재매수 (직전 5일선 매도 금액과 동일)"
+                f"{fill['amount']:,.0f}원 재매수 (직전 매도 회수 금액과 동일)"
             )
 
           signals.append({

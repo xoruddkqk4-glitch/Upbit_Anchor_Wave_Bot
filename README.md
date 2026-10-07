@@ -918,8 +918,18 @@
   - `python -m unittest discover -p "test_*.py"` 전체 26개 단위 테스트 전원 100% 통과 (Ran 26 tests in 0.166s, OK)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
 
-
-
-
-
-
+## 📝 [2026-10-07 19:15] 업데이트 이력 (직전 커밋: 3dd2cb3)
+- **수정 내용** (고가 위 청산 텔레그램 알림 메시지의 재매수 감시 조건 문구를 듀얼 타임프레임(4시간 5MA 상향 회복) 엔진에 맞게 동적 반영 및 메시지 정밀화, 파일: `Upbit_Anchor_Wave_Bot.py`, `test_dual_timeframe_symmetry.py`, `README.md`):
+  1. **고가 위 청산 시 재매수 대기 모드 진입 알림 문구 동적화 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기존의 과거 일봉 단독 시절 하드코딩 텍스트(`직전 매도가 재돌파 및 5일선 우상향 시에만 재매수 감시`)를 `ENABLE_DUAL_TIMEFRAME_MA5` 활성화 여부에 따라 동적 문구(`reentry_cond_desc = "4시간 5MA 상향 회복" if ENABLE_DUAL_TIMEFRAME_MA5 else "5일선 우상향"`)로 개편
+     - 발송 문구: `고점 위 청산 휩소 방지 ➔ 직전 매도가(...) 재돌파 및 4시간 5MA 상향 회복 시에만 재매수 감시`
+     - 주석 및 안내 문구를 최신 듀얼 타임프레임 아키텍처와 100% 동기화
+  2. **재매수 체결 알림 비고 문구 정밀화 (`Upbit_Anchor_Wave_Bot.py`)**:
+     - 기존 `직전 5일선 매도 금액과 동일` 문구를 고가 위 청산 후 Zone 2 재매수 시나리오까지 포괄하도록 `직전 매도 회수 금액과 동일`로 수정
+  3. **메시지 동적 반영 검증 단위 테스트 추가 (`test_dual_timeframe_symmetry.py`)**:
+     - `test_sell_above_ref_high_message_reflects_4h_ma` 추가: 고가 위 청산 시 텔레그램 메시지에 `4시간 5MA 상향 회복`이 정상 포함되고 과거 `5일선 우상향` 문구가 포함되지 않는지 검증
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py test_dual_timeframe_symmetry.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_dual_timeframe_symmetry.py` 6개 단위 테스트 전원 통과 (6/6 PASS, 0.055s)
+  - `python -m unittest discover -p "test_*.py"` 전체 27개 단위 테스트 전원 100% 통과 (Ran 27 tests in 0.358s, OK)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
