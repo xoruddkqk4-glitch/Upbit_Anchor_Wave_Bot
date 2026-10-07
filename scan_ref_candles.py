@@ -442,20 +442,25 @@ def _scan_all_reference_candles_locked():
                 swing_low_price = float(df["low"].iloc[lookback_start : ref_pos + 1].min())
                 wave_height = ref_high - swing_low_price
 
-                # [사전 필터링 1] 기준봉 형성 이후 마감 확정봉들 중 저가가 손절선(저가)을 이탈한 적이 있는지 검증 (과거 이탈 영구 무효화)
+                # [사전 필터링 1] 기준봉 형성 이후 저가가 손절선(저가)을 이탈한 적이 있는지 검증 (마감봉 및 장중 봉 포함 영구 무효화)
                 # 기준봉이 한 번이라도 손절가를 깼다면 해당 지지 구조는 이미 붕괴된 것이며, 이전 일봉은 확인할 필요 없이 즉시 영구 무효화
-                closed_subsequent = closed_df.iloc[ref_pos + 1 :]
+                all_subsequent = df.iloc[ref_pos + 1 :]
                 broken_in_history = False
                 broken_date_str = ""
                 broken_low_val = 0.0
 
-                if not closed_subsequent.empty:
-                    subsequent_min_low = float(closed_subsequent["low"].min())
+                if not all_subsequent.empty:
+                    subsequent_min_low = float(all_subsequent["low"].min())
                     if subsequent_min_low < effective_ref_low:
                         broken_in_history = True
-                        broken_idx = closed_subsequent["low"].idxmin()
+                        broken_idx = all_subsequent["low"].idxmin()
                         broken_date_str = broken_idx.strftime("%Y-%m-%d")
                         broken_low_val = subsequent_min_low
+
+                if not broken_in_history and curr_close < effective_ref_low:
+                    broken_in_history = True
+                    broken_date_str = curr_candle_date
+                    broken_low_val = curr_close
 
                 if broken_in_history:
                     print(

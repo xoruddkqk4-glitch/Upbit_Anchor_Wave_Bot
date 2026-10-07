@@ -933,3 +933,19 @@
   - `python -m unittest test_dual_timeframe_symmetry.py` 6개 단위 테스트 전원 통과 (6/6 PASS, 0.055s)
   - `python -m unittest discover -p "test_*.py"` 전체 27개 단위 테스트 전원 100% 통과 (Ran 27 tests in 0.358s, OK)
   - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
+
+## 📝 [2026-10-08 00:41] 업데이트 이력 (직전 커밋: 3b2f77a)
+- **수정 내용** (기준봉 지지선 붕괴 감시 해제 후 신규 기준봉 오인 재등록 및 텔레그램 알림 무한 반복 버그 해결, 파일: `Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`, `test_ref_invalidation_loop.py`, `README.md`):
+  1. **신규 기준봉 탐색 사전 필터링에 당일 장중 최저가 및 현재가 손절선 이탈 검증 추가 (`Upbit_Anchor_Wave_Bot.py`, `scan_ref_candles.py`)**:
+     - 기존에 신규 기준봉 탐색 시 과거 마감 확정봉(`closed_df`, 어제까지의 일봉)만 저가 이탈 여부를 검사하여, 오늘 장중에 현재가 및 당일 저가가 손절가(기준봉 저가) 미만으로 하락해 상태가 초기화된 종목이 5분 뒤 다음 주기에서 '유효한 기준봉'으로 착각되어 계속 재등록되던 논리적 결함 수정
+     - 기준봉 사후 저점 이탈 검사 대상을 당일 장중 캔들까지 포함(`all_subsequent = df.iloc[ref_pos + 1 :]`)하고, `all_subsequent["low"].min() < effective_ref_low` 또는 `curr_close < effective_ref_low`인 경우 즉시 `[손절선 기이탈 무효화]`로 판정하여 등록 제외 처리
+     - 이에 따라 지지선 붕괴 감시 해제 알림(1회) 발송 후 5분마다 동일 메시지가 무한 반복 발송되던 현상 원천 차단
+  2. **무한 반복 재등록 방지 전용 단위 테스트 추가 (`test_ref_invalidation_loop.py`)**:
+     - 감시 중이던 기준봉의 장중 지지선 붕괴 감지 시 감시 해제 메시지 정상 1회 발송 및 상태 초기화 검증
+     - 초기화 이후 다음 실행 주기(5분 뒤 시뮬레이션)에서 동일 데이터 재평가 시 기준봉 재등록 차단(`active_ref_date is None`) 및 알림 발송 횟수 0회(중복 발송 완전 방지) 검증
+- **검증 결과**:
+  - `python -m py_compile Upbit_Anchor_Wave_Bot.py scan_ref_candles.py test_ref_invalidation_loop.py` 정적 구문 검사 통과 (Exit Code 0)
+  - `python -m unittest test_ref_invalidation_loop.py` 1개 신규 단위 테스트 통과 (1/1 PASS, 0.037s)
+  - `python -m unittest discover -p "test_*.py"` 전체 28개 단위 테스트 전원 100% 통과 (Ran 28 tests in 0.161s, OK)
+  - 실제 업비트 실시간 HBAR 일봉 데이터 기반 검증: 기준봉 재등록 차단 및 알림 발송 0회 확인 (`active_ref_date: None`)
+  - `.env`, `service_account.json` 등 비밀 설정 파일 Git 미추적 상태 정상 유지 (`AUTO_TRADE_EXECUTE` 실주문 영향 없음)
