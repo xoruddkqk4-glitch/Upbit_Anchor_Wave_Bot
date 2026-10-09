@@ -386,9 +386,16 @@ def _scan_all_reference_candles_locked():
                 ref_high = state.get("ref_high", 0.0)
                 ref_mid = state.get("ref_mid", 0.0)
                 effective_ref_low = state.get("effective_ref_low", 0.0)
+                entry_price = float(state.get("entry_price") or 0.0)
+                profit_rate = (
+                    ((curr_close - entry_price) / entry_price * 100.0)
+                    if entry_price > 0
+                    else 0.0
+                )
 
                 print(
-                    f"  [{tag}] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)} |"
+                    f"  [{tag}] {ticker} -> 기준일: {ref_date_str} | 현재가: {format_price(curr_close)}"
+                    f" (수익률 {profit_rate:+.2f}% | 평단: {format_price(entry_price)}) |"
                     f" 중심가: {format_price(ref_mid)} | 손절가: {format_price(effective_ref_low)} | 고가: {format_price(ref_high)}"
                     f" | 14일 ATR: {format_price(state['atr'])}"
                 )
@@ -402,6 +409,8 @@ def _scan_all_reference_candles_locked():
                     "ref_mid": ref_mid,
                     "effective_ref_low": effective_ref_low,
                     "atr": state["atr"],
+                    "entry_price": entry_price,
+                    "profit_rate": profit_rate,
                 })
                 time.sleep(API_DELAY_SEC)
                 continue
@@ -647,6 +656,7 @@ def _scan_all_reference_candles_locked():
                                 "atr": state.get("atr", 0.0),
                                 "trough_low": state["trough_low"],
                                 "bounce_target": bounce_target,
+                                "base_price": state.get("base_price"),
                             })
                     else:
                         # 순수 미진입 종목: 손절선 이탈 또는 만료 체크
@@ -710,6 +720,85 @@ def _scan_all_reference_candles_locked():
 
     save_state(global_state)
 
+    # --------------------------------------------------------------------------
+    # 종목별 정렬 기준 정의 (보유 종목 -> 재매수 대기 -> 감시 중)
+    # 1) 보유 종목: 수익률 높은 순 -> 낮은 순
+    # 2) 재매수 대기: 재매수 가능성(2*N 반등목표 또는 고가 돌파 달성률) 높은 순 -> 낮은 순
+    # 3) 감시 중: 매수 조건 충족(고가 돌파 🚀 및 눌림목 🎯) 최우선, 미도달(중심가 상회 📍)은 고가/중심가 근접도 높은 순
+    # --------------------------------------------------------------------------
+    holding_candles = [c for c in all_reported_candles if c["tag"] == "보유 중"]
+    reentry_candles = [c for c in all_reported_candles if c["tag"] == "재매수 대기"]
+    watching_candles = [
+        c for c in all_reported_candles if c["tag"] in ["신규 포착", "최신 갱신", "감시 중"]
+    ]
+
+    # 1. 보유 종목: 수익률(profit_rate) 내림차순
+    holding_candles.sort(
+        key=lambda c: c.get("profit_rate", -999999.0),
+        reverse=True,
+    )
+
+    # 2. 재매수 대기 종목: 2*N 반등목표 또는 고가 돌파 목표 달성률 내림차순
+    def _sort_reentry_key(c):
+        curr_close = c["curr_close"]
+        bounce_target = c.get("bounce_target")
+        bounce_ratio = (
+            (curr_close / bounce_target)
+            if (bounce_target and bounce_target > 0)
+            else 0.0
+        )
+        high_target = max(c.get("ref_high", 0.0), c.get("base_price") or 0.0)
+        high_ratio = (curr_close / high_target) if high_target > 0 else 0.0
+        return max(bounce_ratio, high_ratio)
+
+    reentry_candles.sort(key=_sort_reentry_key, reverse=True)
+
+    # 3. 감시 중 종목:
+    #    Tier 3: 고가 돌파(🚀) 완료 종목 (돌파율 높은 순)
+    #    Tier 2: 눌림목 영역(🎯) 진입 종목 (중심가 지지 상대 위치 순)
+    #    Tier 1: 중심가 상회(📍) 미도달 종목 (고가 돌파선 또는 중심가 눌림선 중 더 가까운 목표선까지의 근접도 높은 순)
+    #    Tier 0: 기타 (손절가 하회 등)
+    def _sort_watching_key(c):
+        curr_close = c["curr_close"]
+        ref_high = c.get("ref_high", 0.0)
+        ref_mid = c.get("ref_mid", 0.0)
+        effective_ref_low = c.get("effective_ref_low", 0.0)
+
+        # 1) 고가 돌파 (🚀): 이미 고가 돌파 매수 조건 충족
+        if ref_high > 0 and curr_close >= ref_high:
+            breakout_ratio = (curr_close - ref_high) / ref_high
+            return (3, breakout_ratio)
+
+        # 2) 눌림목 영역 (🎯): 이미 중심가 이하 손절가 이상 눌림목 조건 진입
+        elif effective_ref_low <= curr_close <= ref_mid:
+            mid_low_span = ref_mid - effective_ref_low
+            depth_ratio = (
+                (curr_close - effective_ref_low) / mid_low_span
+                if mid_low_span > 0
+                else 0.0
+            )
+            return (2, depth_ratio)
+
+        # 3) 중심가 상회 미도달 종목 (📍): 고가/중심가 중 더 가까운 목표선까지의 근접도 높은 순
+        elif ref_mid < curr_close < ref_high:
+            dist_to_high = (
+                (ref_high - curr_close) / curr_close if curr_close > 0 else 999.0
+            )
+            dist_to_mid = (
+                (curr_close - ref_mid) / curr_close if curr_close > 0 else 999.0
+            )
+            min_dist = min(dist_to_high, dist_to_mid)
+            return (1, -min_dist)
+
+        # 4) 기타 (🚨 손절가 하회 등)
+        else:
+            return (0, curr_close)
+
+    watching_candles.sort(key=_sort_watching_key, reverse=True)
+
+    # 전체 리스트 재결합 (보유 종목 -> 재매수 대기 -> 감시 중 순서)
+    all_reported_candles = holding_candles + reentry_candles + watching_candles
+
     # 텔레그램 일괄(단일) 메시지 발송
     now_kst = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     valid_tickers = [c["ticker"] for c in all_reported_candles]
@@ -734,8 +823,7 @@ def _scan_all_reference_candles_locked():
             "----------------------------------------"
         )
 
-        candle_blocks = []
-        for c in all_reported_candles:
+        def _render_candle_block(c):
             ticker = c["ticker"]
             ref_date = c["ref_date"]
             tag_str = f"[{c['tag']}]"
@@ -757,7 +845,18 @@ def _scan_all_reference_candles_locked():
                 pos_icon = "🚨"
                 pos_label = "손절가 하회"
 
-            price_line = f"{pos_icon} <b>[현재가] ({pos_label})</b>: {format_price(curr_close)}"
+            # 보유 종목인 경우 현재가 옆에 수익률 및 평단가 표기
+            if c.get("tag") == "보유 중" and c.get("profit_rate") is not None:
+                profit_rate = c["profit_rate"]
+                entry_price = c.get("entry_price", 0.0)
+                pnl_sign = "+" if profit_rate > 0 else ""
+                price_line = (
+                    f"{pos_icon} <b>[현재가] ({pos_label})</b>: {format_price(curr_close)}"
+                    f" (<b>수익률: {pnl_sign}{profit_rate:.2f}%</b> | 평단: {format_price(entry_price)})"
+                )
+            else:
+                price_line = f"{pos_icon} <b>[현재가] ({pos_label})</b>: {format_price(curr_close)}"
+
             high_line = f"• 고가: {format_price(ref_high)}"
             mid_line = f"• 중심가: {format_price(ref_mid)}"
             low_line = f"• 손절가: {format_price(effective_ref_low)}"
@@ -773,9 +872,15 @@ def _scan_all_reference_candles_locked():
                 price_rows = [high_line, mid_line, low_line, price_line]
 
             if c.get("tag") == "재매수 대기" and c.get("trough_low") and c.get("bounce_target"):
+                bounce_target = c["bounce_target"]
+                bounce_pct = (
+                    (curr_close / bounce_target * 100.0)
+                    if (bounce_target and bounce_target > 0)
+                    else 0.0
+                )
                 hybrid_line = (
                     f"• <b>[하이브리드]</b> 바닥: {format_price(c['trough_low'])} ➔"
-                    f" 2*N반등목표: <b>{format_price(c['bounce_target'])}</b> (14일 ATR: {format_price(c.get('atr', 0.0))})"
+                    f" 2*N반등목표: <b>{format_price(bounce_target)}</b> (달성률: {bounce_pct:.1f}% | 14일 ATR: {format_price(c.get('atr', 0.0))})"
                 )
                 price_rows.append(hybrid_line)
 
@@ -783,21 +888,37 @@ def _scan_all_reference_candles_locked():
                 f"<b>• {ticker}</b> <code>{tag_str}</code> (기준일: {ref_date})\n"
                 + "\n".join(price_rows)
             )
-            candle_blocks.append(block)
+            return block
 
-        all_blocks = [header_text] + candle_blocks
+        ordered_blocks = []
+        if holding_candles:
+            ordered_blocks.append(f"<b>■ 보유 종목 ({len(holding_candles)}개)</b>")
+            for c in holding_candles:
+                ordered_blocks.append(_render_candle_block(c))
+
+        if reentry_candles:
+            ordered_blocks.append(f"<b>■ 재매수 대기 종목 ({len(reentry_candles)}개)</b>")
+            for c in reentry_candles:
+                ordered_blocks.append(_render_candle_block(c))
+
+        if watching_candles:
+            ordered_blocks.append(f"<b>■ 감시 중 종목 ({len(watching_candles)}개)</b>")
+            for c in watching_candles:
+                ordered_blocks.append(_render_candle_block(c))
+
+        all_blocks = [header_text] + ordered_blocks
         full_text = "\n\n".join(all_blocks)
 
         if len(full_text) <= 3800:
             SendMessage(full_text)
         else:
             chunk = header_text
-            for c_block in candle_blocks:
-                if len(chunk) + len(c_block) + 2 > 3800:
+            for b in ordered_blocks:
+                if len(chunk) + len(b) + 2 > 3800:
                     SendMessage(chunk.strip())
-                    chunk = "<b>📊 [BST 봇] 기준봉 감시 현황 (이어서)</b>\n----------------------------------------\n\n" + c_block
+                    chunk = "<b>📊 [BST 봇] 기준봉 감시 현황 (이어서)</b>\n----------------------------------------\n\n" + b
                 else:
-                    chunk += "\n\n" + c_block
+                    chunk += "\n\n" + b
             if chunk.strip():
                 SendMessage(chunk.strip())
     else:
